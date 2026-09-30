@@ -94,6 +94,48 @@ void test_terminal_immutability() {
                 taskforge::TransitionResult::invalid_transition,
             "failed terminal transition was accepted");
     require(failed_machine.state() == taskforge::TaskState::failed, "failed state changed");
+
+    taskforge::TaskStateMachine timeout_machine;
+    advance_to_running(timeout_machine);
+    require_applied(timeout_machine, taskforge::TaskState::running, taskforge::TaskState::timeout);
+    require(timeout_machine.try_transition(taskforge::TaskState::timeout, taskforge::TaskState::failed) ==
+                taskforge::TransitionResult::invalid_transition,
+            "timeout terminal transition was accepted");
+
+    taskforge::TaskStateMachine cancelled_machine;
+    require_applied(cancelled_machine, taskforge::TaskState::queued, taskforge::TaskState::cancelled);
+    require(cancelled_machine.try_transition(taskforge::TaskState::cancelled,
+                                             taskforge::TaskState::success) ==
+                taskforge::TransitionResult::invalid_transition,
+            "cancelled terminal transition was accepted");
+}
+
+void test_cancellation_and_timeout_edges() {
+    for (const taskforge::TaskState from : {taskforge::TaskState::queued, taskforge::TaskState::ready,
+                                            taskforge::TaskState::starting}) {
+        taskforge::TaskStateMachine machine;
+        if (from == taskforge::TaskState::ready) {
+            require_applied(machine, taskforge::TaskState::queued, taskforge::TaskState::ready);
+        } else if (from == taskforge::TaskState::starting) {
+            require_applied(machine, taskforge::TaskState::queued, taskforge::TaskState::ready);
+            require_applied(machine, taskforge::TaskState::ready, taskforge::TaskState::starting);
+        }
+        require_applied(machine, from, taskforge::TaskState::cancelled);
+    }
+
+    for (const taskforge::TaskState from : {taskforge::TaskState::queued, taskforge::TaskState::ready,
+                                            taskforge::TaskState::starting}) {
+        taskforge::TaskStateMachine machine;
+        if (from == taskforge::TaskState::ready) {
+            require_applied(machine, taskforge::TaskState::queued, taskforge::TaskState::ready);
+        } else if (from == taskforge::TaskState::starting) {
+            require_applied(machine, taskforge::TaskState::queued, taskforge::TaskState::ready);
+            require_applied(machine, taskforge::TaskState::ready, taskforge::TaskState::starting);
+        }
+        require(machine.try_transition(from, taskforge::TaskState::timeout) ==
+                    taskforge::TransitionResult::invalid_transition,
+                "timeout was accepted before running");
+    }
 }
 
 void test_concurrent_terminal_race() {
@@ -108,9 +150,11 @@ void test_concurrent_terminal_race() {
             for (std::size_t index = 0; index < kRaceCompetitors; ++index) {
                 threads.emplace_back([&machine, &results, &start_gate, index] {
                     start_gate.arrive_and_wait();
-                    const taskforge::TaskState desired = index % 2 == 0
-                                                            ? taskforge::TaskState::success
-                                                            : taskforge::TaskState::failed;
+                    constexpr std::array terminal_states{taskforge::TaskState::success,
+                                                         taskforge::TaskState::failed,
+                                                         taskforge::TaskState::timeout,
+                                                         taskforge::TaskState::cancelled};
+                    const taskforge::TaskState desired = terminal_states[index % terminal_states.size()];
                     results[index] = machine.try_transition(taskforge::TaskState::running, desired);
                 });
             }
@@ -141,6 +185,7 @@ int main() {
     test_failure_lifecycles();
     test_invalid_and_mismatched_transitions();
     test_terminal_immutability();
+    test_cancellation_and_timeout_edges();
     test_concurrent_terminal_race();
     return 0;
 }

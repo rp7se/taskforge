@@ -1,8 +1,11 @@
 #include <cerrno>
+#include <chrono>
 #include <csignal>
 #include <cstdlib>
 #include <iostream>
 #include <string>
+#include <stop_token>
+#include <thread>
 #include <vector>
 
 #include "taskforge/process_executor.hpp"
@@ -20,9 +23,87 @@ void require(bool condition, const std::string& message) {
     }
 }
 
-taskforge::ProcessResult run_helper(std::vector<std::string> arguments) {
+taskforge::ProcessResult run_helper(
+    std::vector<std::string> arguments,
+    const taskforge::ProcessExecutionOptions& options = {}) {
     return taskforge::run_process({.executable = TASKFORGE_PROCESS_TEST_HELPER,
-                                   .arguments = std::move(arguments)});
+                                   .arguments = std::move(arguments)},
+                                  options);
+}
+
+void require_control_result(const taskforge::ProcessResult& result,
+                            taskforge::ProcessOutcome outcome) {
+    require(result.outcome == outcome, "unexpected controlled termination outcome");
+    require(result.terminating_signal == SIGKILL, "controlled termination did not record SIGKILL");
+    require(!result.exit_code.has_value(), "controlled termination has an exit code");
+    require(!result.error.has_value(), "controlled termination has an error");
+}
+
+void test_timeout() {
+    const auto result = run_helper({"sleep", "500"},
+                                   {.timeout = std::chrono::milliseconds(30), .stop_token = {}});
+    require_control_result(result, taskforge::ProcessOutcome::timed_out);
+}
+
+void test_manual_cancellation() {
+    std::stop_source source;
+    std::jthread canceller([&source] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        source.request_stop();
+    });
+    const auto started = std::chrono::steady_clock::now();
+    const auto result = run_helper({"sleep", "500"},
+                                   {.timeout = std::nullopt, .stop_token = source.get_token()});
+    require_control_result(result, taskforge::ProcessOutcome::cancelled);
+    require(std::chrono::steady_clock::now() - started < std::chrono::milliseconds(300),
+            "cancellation did not return promptly");
+}
+
+void test_prestart_controls() {
+    std::stop_source source;
+    source.request_stop();
+    const auto cancelled = taskforge::run_process(
+        {.executable = "/definitely/not/a/taskforge-executable", .arguments = {}},
+        {.timeout = std::nullopt, .stop_token = source.get_token()});
+    require(cancelled.outcome == taskforge::ProcessOutcome::cancelled,
+            "already-cancelled execution resolved or started a child");
+
+    const auto timeout = taskforge::run_process(
+        {.executable = "/definitely/not/a/taskforge-executable", .arguments = {}},
+        {.timeout = std::chrono::milliseconds::zero(), .stop_token = {}});
+    require(timeout.outcome == taskforge::ProcessOutcome::timed_out,
+            "immediate timeout resolved or started a child");
+}
+
+void test_control_races() {
+    for (int iteration = 0; iteration < 32; ++iteration) {
+        std::stop_source source;
+        std::jthread canceller([&source] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            source.request_stop();
+        });
+        const auto result = run_helper({"exit-after", "20", "0"},
+                                       {.timeout = std::nullopt, .stop_token = source.get_token()});
+        require(result.outcome == taskforge::ProcessOutcome::exited ||
+                    result.outcome == taskforge::ProcessOutcome::cancelled,
+                "cancel versus natural-exit race had an invalid outcome");
+    }
+
+    for (int iteration = 0; iteration < 32; ++iteration) {
+        const auto result = run_helper({"exit-after", "20", "0"},
+                                       {.timeout = std::chrono::milliseconds(20), .stop_token = {}});
+        require(result.outcome == taskforge::ProcessOutcome::exited ||
+                    result.outcome == taskforge::ProcessOutcome::timed_out,
+                "timeout versus natural-exit race had an invalid outcome");
+    }
+}
+
+void test_output_before_timeout() {
+    const auto result = run_helper({"print-then-sleep", "500"},
+                                   {.timeout = std::chrono::milliseconds(30), .stop_token = {}});
+    require_control_result(result, taskforge::ProcessOutcome::timed_out);
+    require(result.stdout_data == "before timeout stdout\n", "stdout before timeout was lost");
+    require(result.stderr_data == "before timeout stderr\n", "stderr before timeout was lost");
 }
 
 void require_exit(const taskforge::ProcessResult& result, int exit_code) {
@@ -77,6 +158,12 @@ int main() {
     require_exit(both_result, 0);
     require(both_result.stdout_data.size() == 128U * 1024U, "stdout drain was incomplete");
     require(both_result.stderr_data.size() == 128U * 1024U, "stderr drain was incomplete");
+
+    test_timeout();
+    test_manual_cancellation();
+    test_prestart_controls();
+    test_control_races();
+    test_output_before_timeout();
 
     return 0;
 }
