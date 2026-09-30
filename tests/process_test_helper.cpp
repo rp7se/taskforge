@@ -1,8 +1,10 @@
 #include <array>
+#include <chrono>
 #include <csignal>
 #include <cstdlib>
 #include <iostream>
 #include <string_view>
+#include <thread>
 #include <unistd.h>
 
 namespace {
@@ -64,6 +66,20 @@ int main(int argc, char* argv[]) {
             write_all(STDOUT_FILENO, stdout_block.data(), stdout_block.size());
             write_all(STDERR_FILENO, stderr_block.data(), stderr_block.size());
         }
+        return 0;
+    }
+    if (mode == "sleep" && argc == 3) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(std::atoi(argv[2])));
+        return 0;
+    }
+    if (mode == "exit-after" && argc == 4) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(std::atoi(argv[2])));
+        return std::atoi(argv[3]);
+    }
+    if (mode == "print-then-sleep" && argc == 3) {
+        write_all(STDOUT_FILENO, "before timeout stdout\n", 22);
+        write_all(STDERR_FILENO, "before timeout stderr\n", 22);
+        std::this_thread::sleep_for(std::chrono::milliseconds(std::atoi(argv[2])));
         return 0;
     }
     return 5;

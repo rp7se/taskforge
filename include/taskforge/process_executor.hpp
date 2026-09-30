@@ -1,6 +1,8 @@
 #pragma once
 
+#include <chrono>
 #include <optional>
+#include <stop_token>
 #include <string>
 #include <vector>
 
@@ -16,6 +18,8 @@ enum class ProcessOutcome {
     signaled,
     startup_failed,
     parent_error,
+    timed_out,
+    cancelled,
 };
 
 enum class ProcessErrorStage {
@@ -32,6 +36,7 @@ enum class ProcessErrorStage {
     parent_read_stdout,
     parent_read_stderr,
     parent_read_startup,
+    parent_kill,
     parent_waitpid,
     startup_protocol,
 };
@@ -50,6 +55,12 @@ struct ProcessResult {
     std::optional<ProcessError> error;
 };
 
-[[nodiscard]] ProcessResult run_process(const ProcessSpec& spec);
+struct ProcessExecutionOptions {
+    std::optional<std::chrono::milliseconds> timeout;
+    std::stop_token stop_token;
+};
+
+[[nodiscard]] ProcessResult run_process(const ProcessSpec& spec,
+                                        const ProcessExecutionOptions& options = {});
 
 }  // namespace taskforge

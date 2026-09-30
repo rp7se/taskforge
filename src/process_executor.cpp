@@ -1,7 +1,10 @@
 #include "taskforge/process_executor.hpp"
 
 #include <array>
+#include <algorithm>
 #include <cerrno>
+#include <chrono>
+#include <csignal>
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>
@@ -199,10 +202,52 @@ void redirect_child_output(int source_fd, int destination_fd, ProcessErrorStage 
     return true;
 }
 
+enum class ControlDecision { none, timed_out, cancelled };
+
+[[nodiscard]] bool observe_child(pid_t child, int& status, bool& reaped, bool& waitpid_error,
+                                 ProcessResult& failure) {
+    while (true) {
+        const pid_t observed = ::waitpid(child, &status, WNOHANG);
+        if (observed == 0) {
+            return true;
+        }
+        if (observed == child) {
+            reaped = true;
+            return true;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        waitpid_error = true;
+        failure = parent_failure(ProcessErrorStage::parent_waitpid, errno);
+        return false;
+    }
+}
+
+void drain_available(UniqueFd& stdout_fd, UniqueFd& stderr_fd, UniqueFd& startup_fd,
+                     ProcessResult& result, std::string& startup_bytes) {
+    ProcessResult ignored{};
+    (void)drain_fd(stdout_fd, result.stdout_data, ProcessErrorStage::parent_read_stdout, ignored);
+    (void)drain_fd(stderr_fd, result.stderr_data, ProcessErrorStage::parent_read_stderr, ignored);
+    (void)drain_fd(startup_fd, startup_bytes, ProcessErrorStage::parent_read_startup, ignored);
+}
+
 }  // namespace
 
-ProcessResult run_process(const ProcessSpec& spec) {
+ProcessResult run_process(const ProcessSpec& spec, const ProcessExecutionOptions& options) {
     ProcessResult result{};
+    if (options.stop_token.stop_requested()) {
+        result.outcome = ProcessOutcome::cancelled;
+        return result;
+    }
+    if (options.timeout.has_value() && options.timeout.value() <= std::chrono::milliseconds::zero()) {
+        result.outcome = ProcessOutcome::timed_out;
+        return result;
+    }
+    const auto started_at = std::chrono::steady_clock::now();
+    const auto deadline = options.timeout.has_value()
+                              ? std::optional(started_at + options.timeout.value())
+                              : std::optional<std::chrono::steady_clock::time_point>{};
     const std::optional<std::string> resolved_executable = resolve_executable(spec, result);
     if (!resolved_executable.has_value()) {
         return result;
@@ -217,6 +262,15 @@ ProcessResult run_process(const ProcessSpec& spec) {
     argv.push_back(nullptr);
     const char* const resolved_executable_path = resolved_executable->c_str();
     char* const* const argv_data = argv.data();
+
+    if (options.stop_token.stop_requested()) {
+        result.outcome = ProcessOutcome::cancelled;
+        return result;
+    }
+    if (deadline.has_value() && std::chrono::steady_clock::now() >= deadline.value()) {
+        result.outcome = ProcessOutcome::timed_out;
+        return result;
+    }
 
     Pipe stdout_pipe;
     Pipe stderr_pipe;
@@ -258,7 +312,44 @@ ProcessResult run_process(const ProcessSpec& spec) {
 
     std::string startup_bytes;
     bool io_ok = true;
-    while (stdout_pipe.read_end.valid() || stderr_pipe.read_end.valid() || startup_pipe.read_end.valid()) {
+    bool reaped = false;
+    bool waitpid_error = false;
+    int wait_status = 0;
+    ControlDecision control = ControlDecision::none;
+    while (!reaped || stdout_pipe.read_end.valid() || stderr_pipe.read_end.valid() ||
+           startup_pipe.read_end.valid()) {
+        if (!reaped && !observe_child(child, wait_status, reaped, waitpid_error, result)) {
+            io_ok = false;
+            break;
+        }
+
+        if (!reaped) {
+            if (options.stop_token.stop_requested()) {
+                control = ControlDecision::cancelled;
+            } else if (deadline.has_value() && std::chrono::steady_clock::now() >= deadline.value()) {
+                control = ControlDecision::timed_out;
+            }
+            if (control != ControlDecision::none) {
+                if (::kill(child, SIGKILL) != 0 && errno != ESRCH) {
+                    result = parent_failure(ProcessErrorStage::parent_kill, errno);
+                    io_ok = false;
+                    break;
+                }
+                if (!wait_for_child(child, wait_status, result)) {
+                    waitpid_error = true;
+                    io_ok = false;
+                    break;
+                }
+                reaped = true;
+                drain_available(stdout_pipe.read_end, stderr_pipe.read_end, startup_pipe.read_end,
+                                result, startup_bytes);
+                stdout_pipe.read_end.reset();
+                stderr_pipe.read_end.reset();
+                startup_pipe.read_end.reset();
+                break;
+            }
+        }
+
         std::array<pollfd, 3> poll_fds{};
         std::array<int, 3> kinds{};
         nfds_t count = 0;
@@ -273,9 +364,19 @@ ProcessResult run_process(const ProcessSpec& spec) {
         add_fd(stderr_pipe.read_end, 1);
         add_fd(startup_pipe.read_end, 2);
 
+        int poll_timeout = 20;
+        if (deadline.has_value() && !reaped) {
+            const auto remaining = deadline.value() - std::chrono::steady_clock::now();
+            if (remaining <= std::chrono::steady_clock::duration::zero()) {
+                continue;
+            }
+            const auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(remaining);
+            poll_timeout = static_cast<int>(std::min<std::int64_t>(
+                20, std::max<std::int64_t>(0, milliseconds.count())));
+        }
         int poll_result;
         do {
-            poll_result = ::poll(poll_fds.data(), count, -1);
+            poll_result = ::poll(poll_fds.data(), count, poll_timeout);
         } while (poll_result < 0 && errno == EINTR);
         if (poll_result < 0) {
             result = parent_failure(ProcessErrorStage::parent_poll, errno);
@@ -312,9 +413,33 @@ ProcessResult run_process(const ProcessSpec& spec) {
     stderr_pipe.read_end.reset();
     startup_pipe.read_end.reset();
 
-    int wait_status = 0;
-    const bool waited = wait_for_child(child, wait_status, result);
-    if (!io_ok || !waited) {
+    if (!reaped && !waitpid_error) {
+        if (!io_ok) {
+            (void)::kill(child, SIGKILL);
+        }
+        const bool waited = wait_for_child(child, wait_status, result);
+        reaped = waited;
+        if (!waited) {
+            waitpid_error = true;
+            io_ok = false;
+        }
+    }
+    if (!io_ok) {
+        return result;
+    }
+
+    if (control == ControlDecision::timed_out) {
+        result.outcome = ProcessOutcome::timed_out;
+        if (WIFSIGNALED(wait_status)) {
+            result.terminating_signal = WTERMSIG(wait_status);
+        }
+        return result;
+    }
+    if (control == ControlDecision::cancelled) {
+        result.outcome = ProcessOutcome::cancelled;
+        if (WIFSIGNALED(wait_status)) {
+            result.terminating_signal = WTERMSIG(wait_status);
+        }
         return result;
     }
 
