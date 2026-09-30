@@ -31,14 +31,24 @@ enum class ProcessErrorStage {
     fork,
     child_dup_stdout,
     child_dup_stderr,
+    child_process_group_setup,
     child_exec,
     parent_poll,
     parent_read_stdout,
     parent_read_stderr,
     parent_read_startup,
     parent_kill,
+    parent_process_group_setup,
+    parent_group_signal,
     parent_waitpid,
     startup_protocol,
+};
+
+enum class ProcessCleanupOutcome {
+    not_needed,
+    terminated_during_grace,
+    killed_after_grace,
+    failed,
 };
 
 struct ProcessError {
@@ -53,11 +63,13 @@ struct ProcessResult {
     std::optional<int> exit_code;
     std::optional<int> terminating_signal;
     std::optional<ProcessError> error;
+    ProcessCleanupOutcome cleanup_outcome = ProcessCleanupOutcome::not_needed;
 };
 
 struct ProcessExecutionOptions {
     std::optional<std::chrono::milliseconds> timeout;
     std::stop_token stop_token;
+    std::chrono::milliseconds termination_grace{100};
 };
 
 [[nodiscard]] ProcessResult run_process(const ProcessSpec& spec,

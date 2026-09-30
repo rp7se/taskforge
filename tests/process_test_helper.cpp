@@ -1,13 +1,22 @@
 #include <array>
 #include <chrono>
+#include <cerrno>
 #include <csignal>
+#include <cstdio>
 #include <cstdlib>
 #include <iostream>
 #include <string_view>
 #include <thread>
+#include <sys/wait.h>
 #include <unistd.h>
 
 namespace {
+
+volatile std::sig_atomic_t term_received = 0;
+std::array<pid_t, 8> spawned_children{};
+int spawned_count = 0;
+
+void note_term(int) { term_received = 1; }
 
 void write_all(int fd, const char* data, std::size_t size) {
     std::size_t written = 0;
@@ -80,6 +89,48 @@ int main(int argc, char* argv[]) {
         write_all(STDOUT_FILENO, "before timeout stdout\n", 22);
         write_all(STDERR_FILENO, "before timeout stderr\n", 22);
         std::this_thread::sleep_for(std::chrono::milliseconds(std::atoi(argv[2])));
+        return 0;
+    }
+    if (mode == "spawn-descendants" && argc == 6) {
+        const int sleep_ms = std::atoi(argv[2]);
+        const bool parent_exits = std::atoi(argv[3]) != 0;
+        const bool ignore_term = std::atoi(argv[4]) != 0;
+        const int count = std::atoi(argv[5]);
+        char line[96]{};
+        const int parent_size = std::snprintf(line, sizeof(line), "PARENT_PID=%ld PGID=%ld\n",
+                                              static_cast<long>(::getpid()), static_cast<long>(::getpgrp()));
+        write_all(STDOUT_FILENO, line, static_cast<std::size_t>(parent_size));
+        for (int index = 0; index < count; ++index) {
+            const pid_t descendant = ::fork();
+            if (descendant == 0) {
+                if (ignore_term) {
+                    std::signal(SIGTERM, SIG_IGN);
+                }
+                const int size = std::snprintf(line, sizeof(line), "DESCENDANT_PID=%ld PGID=%ld\n",
+                                               static_cast<long>(::getpid()), static_cast<long>(::getpgrp()));
+                write_all(STDOUT_FILENO, line, static_cast<std::size_t>(size));
+                write_all(STDERR_FILENO, "descendant stderr\n", 18);
+                std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+                _exit(0);
+            }
+            spawned_children[spawned_count++] = descendant;
+        }
+        if (parent_exits) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            return 0;
+        }
+        if (!ignore_term) {
+            std::signal(SIGTERM, note_term);
+            while (!term_received) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            for (int index = 0; index < spawned_count; ++index) {
+                while (::waitpid(spawned_children[index], nullptr, 0) < 0 && errno == EINTR) {
+                }
+            }
+            return 0;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
         return 0;
     }
     return 5;

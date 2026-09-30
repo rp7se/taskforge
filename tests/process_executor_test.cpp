@@ -31,12 +31,106 @@ taskforge::ProcessResult run_helper(
                                   options);
 }
 
+void require_exit(const taskforge::ProcessResult& result, int exit_code);
+
 void require_control_result(const taskforge::ProcessResult& result,
                             taskforge::ProcessOutcome outcome) {
     require(result.outcome == outcome, "unexpected controlled termination outcome");
-    require(result.terminating_signal == SIGKILL, "controlled termination did not record SIGKILL");
     require(!result.exit_code.has_value(), "controlled termination has an exit code");
     require(!result.error.has_value(), "controlled termination has an error");
+}
+
+std::vector<pid_t> pids_from_output(const std::string& output, const std::string& marker) {
+    std::vector<pid_t> pids;
+    std::size_t offset = 0;
+    while ((offset = output.find(marker, offset)) != std::string::npos) {
+        const std::size_t value_start = offset + marker.size();
+        const std::size_t value_end = output.find(' ', value_start);
+        pids.push_back(static_cast<pid_t>(std::stol(output.substr(value_start, value_end - value_start))));
+        offset = value_start;
+    }
+    return pids;
+}
+
+bool process_is_gone(pid_t pid) {
+    return ::kill(pid, 0) != 0 && errno == ESRCH;
+}
+
+void require_gone(pid_t pid) {
+    for (int attempt = 0; attempt < 50; ++attempt) {
+        if (process_is_gone(pid)) {
+            return;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    require(false, "known descendant process remained after cleanup");
+}
+
+void test_process_group_cleanup() {
+    const auto cooperative = run_helper(
+        {"spawn-descendants", "500", "0", "0", "1"},
+        {.timeout = std::chrono::milliseconds(30), .stop_token = {}, .termination_grace = std::chrono::milliseconds(80)});
+    require_control_result(cooperative, taskforge::ProcessOutcome::timed_out);
+    require(cooperative.cleanup_outcome == taskforge::ProcessCleanupOutcome::terminated_during_grace,
+            "cooperative process group was not terminated during grace");
+    const auto cooperative_descendants = pids_from_output(cooperative.stdout_data, "DESCENDANT_PID=");
+    require(cooperative_descendants.size() == 1, "cooperative descendant PID was not captured");
+    require_gone(cooperative_descendants.front());
+
+    const auto escalation = run_helper(
+        {"spawn-descendants", "500", "0", "1", "1"},
+        {.timeout = std::chrono::milliseconds(100), .stop_token = {}, .termination_grace = std::chrono::milliseconds(30)});
+    require_control_result(escalation, taskforge::ProcessOutcome::timed_out);
+    require(escalation.cleanup_outcome == taskforge::ProcessCleanupOutcome::killed_after_grace,
+            "TERM-ignoring descendant was not escalated to SIGKILL: " +
+                std::to_string(static_cast<int>(escalation.cleanup_outcome)));
+    const auto escalation_descendants = pids_from_output(escalation.stdout_data, "DESCENDANT_PID=");
+    require(escalation_descendants.size() == 1, "escalation descendant PID was not captured");
+    require_gone(escalation_descendants.front());
+}
+
+void test_natural_exit_and_multiple_descendants() {
+    const auto natural = run_helper(
+        {"spawn-descendants", "500", "1", "0", "1"},
+        {.timeout = std::nullopt, .stop_token = {}, .termination_grace = std::chrono::milliseconds(80)});
+    require_exit(natural, 0);
+    require(natural.cleanup_outcome == taskforge::ProcessCleanupOutcome::terminated_during_grace,
+            "natural parent exit did not clean its descendant group");
+    require(natural.stderr_data.find("descendant stderr\n") != std::string::npos,
+            "descendant output was not captured before cleanup");
+    const auto natural_descendants = pids_from_output(natural.stdout_data, "DESCENDANT_PID=");
+    require(natural_descendants.size() == 1, "natural-exit descendant PID was not captured");
+    require_gone(natural_descendants.front());
+
+    const auto multiple = run_helper(
+        {"spawn-descendants", "500", "0", "0", "2"},
+        {.timeout = std::chrono::milliseconds(30), .stop_token = {}, .termination_grace = std::chrono::milliseconds(80)});
+    require_control_result(multiple, taskforge::ProcessOutcome::timed_out);
+    const auto parent = pids_from_output(multiple.stdout_data, "PARENT_PID=");
+    const auto descendants = pids_from_output(multiple.stdout_data, "DESCENDANT_PID=");
+    require(parent.size() == 1 && descendants.size() == 2, "process-group helper did not report all PIDs");
+    require(multiple.stdout_data.find("PARENT_PID=" + std::to_string(parent.front()) + " PGID=" + std::to_string(parent.front())) != std::string::npos,
+            "direct child was not a process-group leader");
+    for (const pid_t descendant : descendants) {
+        require(multiple.stdout_data.find("DESCENDANT_PID=" + std::to_string(descendant) + " PGID=" + std::to_string(parent.front())) != std::string::npos,
+                "descendant did not inherit the task process group");
+        require_gone(descendant);
+    }
+}
+
+void test_cancel_cleans_descendant() {
+    std::stop_source source;
+    std::jthread canceller([&source] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        source.request_stop();
+    });
+    const auto result = run_helper(
+        {"spawn-descendants", "500", "0", "0", "1"},
+        {.timeout = std::nullopt, .stop_token = source.get_token(), .termination_grace = std::chrono::milliseconds(80)});
+    require_control_result(result, taskforge::ProcessOutcome::cancelled);
+    const auto descendants = pids_from_output(result.stdout_data, "DESCENDANT_PID=");
+    require(descendants.size() == 1, "cancelled descendant PID was not captured");
+    require_gone(descendants.front());
 }
 
 void test_timeout() {
@@ -164,6 +258,9 @@ int main() {
     test_prestart_controls();
     test_control_races();
     test_output_before_timeout();
+    test_process_group_cleanup();
+    test_natural_exit_and_multiple_descendants();
+    test_cancel_cleans_descendant();
 
     return 0;
 }
