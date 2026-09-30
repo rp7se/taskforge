@@ -175,15 +175,21 @@ void redirect_child_output(int source_fd, int destination_fd, ProcessErrorStage 
     return true;
 }
 
-[[nodiscard]] bool group_exists(pid_t pgid, ProcessResult& failure) {
+[[nodiscard]] bool group_exists(bool process_group_confirmed, pid_t pgid,
+                                ProcessResult& failure) {
+    if (!process_group_confirmed || pgid <= 1 || pgid == ::getpgrp()) {
+        failure = parent_failure(ProcessErrorStage::parent_group_signal, EINVAL);
+        return false;
+    }
     if (::kill(-pgid, 0) == 0) { return true; }
     if (errno == ESRCH) { return false; }
     failure = parent_failure(ProcessErrorStage::parent_group_signal, errno);
     return false;
 }
 
-[[nodiscard]] bool signal_group(pid_t pgid, int signal, ProcessResult& failure) {
-    if (pgid <= 1 || pgid == ::getpgrp()) {
+[[nodiscard]] bool signal_group(bool process_group_confirmed, pid_t pgid, int signal,
+                                ProcessResult& failure) {
+    if (!process_group_confirmed || pgid <= 1 || pgid == ::getpgrp()) {
         failure = parent_failure(ProcessErrorStage::parent_group_signal, EINVAL);
         return false;
     }
@@ -239,15 +245,29 @@ ProcessResult run_process(const ProcessSpec& spec, const ProcessExecutionOptions
         child_failure(startup_write, ProcessErrorStage::child_exec);
     }
     const pid_t task_pgid = child;
+    bool process_group_confirmed = false;
     if (::setpgid(child, child) != 0) {
         const int setup_error = errno;
-        const pid_t observed_pgid = ::getpgid(child);
-        if (observed_pgid != child && observed_pgid != -1) {
-            (void)::kill(child, SIGKILL);
+        pid_t observed_pgid;
+        do {
+            observed_pgid = ::getpgid(child);
+        } while (observed_pgid == -1 && errno == EINTR);
+        if (observed_pgid == child) {
+            process_group_confirmed = true;
+        } else {
             int ignored_status = 0;
-            (void)wait_for_child(child, ignored_status, result);
+            pid_t observed_child;
+            do {
+                observed_child = ::waitpid(child, &ignored_status, WNOHANG);
+            } while (observed_child == -1 && errno == EINTR);
+            if (observed_child == 0) {
+                (void)::kill(child, SIGKILL);
+                (void)wait_for_child(child, ignored_status, result);
+            }
             return parent_failure(ProcessErrorStage::parent_process_group_setup, setup_error);
         }
+    } else {
+        process_group_confirmed = true;
     }
     stdout_pipe.write_end.reset(); stderr_pipe.write_end.reset(); startup_pipe.write_end.reset();
 
@@ -268,10 +288,10 @@ ProcessResult run_process(const ProcessSpec& spec, const ProcessExecutionOptions
             if (!reaped && options.stop_token.stop_requested()) { control = ControlDecision::cancelled; }
             else if (!reaped && deadline && std::chrono::steady_clock::now() >= *deadline) { control = ControlDecision::timed_out; }
             ProcessResult group_probe{};
-            const bool group_live = group_exists(task_pgid, group_probe);
+            const bool group_live = group_exists(process_group_confirmed, task_pgid, group_probe);
             if (group_probe.error) { result = group_probe; io_ok = false; break; }
             if (control != ControlDecision::none || (reaped && group_live)) {
-                if (group_live && !signal_group(task_pgid, SIGTERM, result)) { io_ok = false; break; }
+                if (group_live && !signal_group(process_group_confirmed, task_pgid, SIGTERM, result)) { io_ok = false; break; }
                 if (group_live) {
                     cleanup = CleanupPhase::grace;
                     grace_deadline = std::chrono::steady_clock::now() + std::max(options.termination_grace, std::chrono::milliseconds::zero());
@@ -281,17 +301,17 @@ ProcessResult run_process(const ProcessSpec& spec, const ProcessExecutionOptions
             }
         } else if (cleanup == CleanupPhase::grace) {
             ProcessResult group_probe{};
-            const bool group_live = group_exists(task_pgid, group_probe);
+            const bool group_live = group_exists(process_group_confirmed, task_pgid, group_probe);
             if (group_probe.error) { result = group_probe; io_ok = false; break; }
             if (!group_live) { cleanup = CleanupPhase::complete; result.cleanup_outcome = ProcessCleanupOutcome::terminated_during_grace; close_after_drain = true; }
             else if (std::chrono::steady_clock::now() >= grace_deadline) {
-                if (!signal_group(task_pgid, SIGKILL, result)) { io_ok = false; break; }
+                if (!signal_group(process_group_confirmed, task_pgid, SIGKILL, result)) { io_ok = false; break; }
                 cleanup = CleanupPhase::kill;
                 kill_deadline = std::chrono::steady_clock::now() + kKillCleanupWindow;
             }
         } else if (cleanup == CleanupPhase::kill) {
             ProcessResult group_probe{};
-            const bool group_live = group_exists(task_pgid, group_probe);
+            const bool group_live = group_exists(process_group_confirmed, task_pgid, group_probe);
             if (group_probe.error) { result = group_probe; io_ok = false; break; }
             if (!group_live) { cleanup = CleanupPhase::complete; result.cleanup_outcome = ProcessCleanupOutcome::killed_after_grace; close_after_drain = true; }
             else if (std::chrono::steady_clock::now() >= kill_deadline) { cleanup = CleanupPhase::failed; result.cleanup_outcome = ProcessCleanupOutcome::failed; close_after_drain = true; }
