@@ -52,6 +52,9 @@ int main() {
     const auto nonzero_result = run_helper({"exit", "7"});
     require_exit(nonzero_result, 7);
 
+    const auto path_result = taskforge::run_process({.executable = "true", .arguments = {}});
+    require_exit(path_result, 0);
+
     const auto signaled_result = run_helper({"signal"});
     require(signaled_result.outcome == taskforge::ProcessOutcome::signaled,
             "signal termination was not reported");

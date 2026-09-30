@@ -23,6 +23,7 @@ enum class ProcessErrorStage {
     create_stderr_pipe,
     create_startup_pipe,
     configure_pipe,
+    resolve_executable,
     fork,
     child_dup_stdout,
     child_dup_stderr,

@@ -4,8 +4,10 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
+#include <cstdlib>
 #include <fcntl.h>
 #include <poll.h>
+#include <string_view>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -86,12 +88,54 @@ struct StartupMessage {
     return true;
 }
 
-[[noreturn]] void child_failure(const UniqueFd& startup_write, ProcessErrorStage stage) {
+[[nodiscard]] std::optional<std::string> resolve_executable(const ProcessSpec& spec,
+                                                            ProcessResult& failure) {
+    if (spec.executable.empty()) {
+        failure = parent_failure(ProcessErrorStage::resolve_executable, ENOENT);
+        return std::nullopt;
+    }
+    if (spec.executable.find('/') != std::string::npos) {
+        return spec.executable;
+    }
+
+    const char* path_environment = std::getenv("PATH");
+    if (path_environment == nullptr) {
+        failure = parent_failure(ProcessErrorStage::resolve_executable, ENOENT);
+        return std::nullopt;
+    }
+    const std::string path(path_environment);
+    int resolution_error = ENOENT;
+    std::size_t component_start = 0;
+    while (true) {
+        const std::size_t component_end = path.find(':', component_start);
+        const std::string_view component(path.data() + component_start,
+                                         (component_end == std::string::npos ? path.size()
+                                                                             : component_end) -
+                                             component_start);
+        std::string candidate = component.empty() ? "." : std::string(component);
+        candidate += '/';
+        candidate += spec.executable;
+        if (::access(candidate.c_str(), X_OK) == 0) {
+            return candidate;
+        }
+        if (errno == EACCES) {
+            resolution_error = EACCES;
+        }
+        if (component_end == std::string::npos) {
+            break;
+        }
+        component_start = component_end + 1;
+    }
+    failure = parent_failure(ProcessErrorStage::resolve_executable, resolution_error);
+    return std::nullopt;
+}
+
+[[noreturn]] void child_failure(int startup_write_fd, ProcessErrorStage stage) {
     const StartupMessage message{static_cast<std::uint8_t>(stage), errno};
     const auto* bytes = reinterpret_cast<const char*>(&message);
     std::size_t written = 0;
     while (written < sizeof(message)) {
-        const ssize_t result = ::write(startup_write.get(), bytes + written, sizeof(message) - written);
+        const ssize_t result = ::write(startup_write_fd, bytes + written, sizeof(message) - written);
         if (result > 0) {
             written += static_cast<std::size_t>(result);
             continue;
@@ -104,21 +148,20 @@ struct StartupMessage {
     _exit(127);
 }
 
-void redirect_child_output(UniqueFd& source, int destination, ProcessErrorStage stage,
-                           const UniqueFd& startup_write) {
-    if (source.get() == destination) {
-        const int descriptor_flags = ::fcntl(source.get(), F_GETFD);
+void redirect_child_output(int source_fd, int destination_fd, ProcessErrorStage stage,
+                           int startup_write_fd) {
+    if (source_fd == destination_fd) {
+        const int descriptor_flags = ::fcntl(source_fd, F_GETFD);
         if (descriptor_flags < 0 ||
-            ::fcntl(source.get(), F_SETFD, descriptor_flags & ~FD_CLOEXEC) != 0) {
-            child_failure(startup_write, stage);
+            ::fcntl(source_fd, F_SETFD, descriptor_flags & ~FD_CLOEXEC) != 0) {
+            child_failure(startup_write_fd, stage);
         }
-        (void)source.release();
         return;
     }
-    if (::dup2(source.get(), destination) < 0) {
-        child_failure(startup_write, stage);
+    if (::dup2(source_fd, destination_fd) < 0) {
+        child_failure(startup_write_fd, stage);
     }
-    source.reset();
+    (void)::close(source_fd);
 }
 
 [[nodiscard]] bool drain_fd(UniqueFd& fd, std::string& output, ProcessErrorStage stage,
@@ -159,11 +202,22 @@ void redirect_child_output(UniqueFd& source, int destination, ProcessErrorStage 
 }  // namespace
 
 ProcessResult run_process(const ProcessSpec& spec) {
-    if (spec.executable.empty()) {
-        return parent_failure(ProcessErrorStage::child_exec, ENOENT);
+    ProcessResult result{};
+    const std::optional<std::string> resolved_executable = resolve_executable(spec, result);
+    if (!resolved_executable.has_value()) {
+        return result;
     }
 
-    ProcessResult result{};
+    std::vector<char*> argv;
+    argv.reserve(spec.arguments.size() + 2);
+    argv.push_back(const_cast<char*>(spec.executable.c_str()));
+    for (const std::string& argument : spec.arguments) {
+        argv.push_back(const_cast<char*>(argument.c_str()));
+    }
+    argv.push_back(nullptr);
+    const char* const resolved_executable_path = resolved_executable->c_str();
+    char* const* const argv_data = argv.data();
+
     Pipe stdout_pipe;
     Pipe stderr_pipe;
     Pipe startup_pipe;
@@ -176,28 +230,26 @@ ProcessResult run_process(const ProcessSpec& spec) {
         return result;
     }
 
+    const int stdout_read_fd = stdout_pipe.read_end.get();
+    const int stdout_write_fd = stdout_pipe.write_end.get();
+    const int stderr_read_fd = stderr_pipe.read_end.get();
+    const int stderr_write_fd = stderr_pipe.write_end.get();
+    const int startup_read_fd = startup_pipe.read_end.get();
+    const int startup_write_fd = startup_pipe.write_end.get();
     const pid_t child = ::fork();
     if (child < 0) {
         return parent_failure(ProcessErrorStage::fork, errno);
     }
     if (child == 0) {
-        stdout_pipe.read_end.reset();
-        stderr_pipe.read_end.reset();
-        startup_pipe.read_end.reset();
-        redirect_child_output(stdout_pipe.write_end, STDOUT_FILENO,
-                              ProcessErrorStage::child_dup_stdout, startup_pipe.write_end);
-        redirect_child_output(stderr_pipe.write_end, STDERR_FILENO,
-                              ProcessErrorStage::child_dup_stderr, startup_pipe.write_end);
-
-        std::vector<char*> argv;
-        argv.reserve(spec.arguments.size() + 2);
-        argv.push_back(const_cast<char*>(spec.executable.c_str()));
-        for (const std::string& argument : spec.arguments) {
-            argv.push_back(const_cast<char*>(argument.c_str()));
-        }
-        argv.push_back(nullptr);
-        ::execvp(argv.front(), argv.data());
-        child_failure(startup_pipe.write_end, ProcessErrorStage::child_exec);
+        (void)::close(stdout_read_fd);
+        (void)::close(stderr_read_fd);
+        (void)::close(startup_read_fd);
+        redirect_child_output(stdout_write_fd, STDOUT_FILENO,
+                              ProcessErrorStage::child_dup_stdout, startup_write_fd);
+        redirect_child_output(stderr_write_fd, STDERR_FILENO,
+                              ProcessErrorStage::child_dup_stderr, startup_write_fd);
+        ::execv(resolved_executable_path, argv_data);
+        child_failure(startup_write_fd, ProcessErrorStage::child_exec);
     }
 
     stdout_pipe.write_end.reset();
