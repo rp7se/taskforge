@@ -242,10 +242,6 @@ void CgroupV2Task::collect_events(ProcessResult& result) const {
             !read_counter("memory.events", "max", events.memory_max_events)) goto diagnostic_failure;
         if (!read_text(path_ / "memory.max", text, error_number) ||
             !(events.memory_max_bytes = number(text)).has_value()) goto diagnostic_failure;
-        if (!read_text(path_ / "memory.current", text, error_number) ||
-            !(events.memory_current_bytes = number(text)).has_value()) goto diagnostic_failure;
-        if (!read_text(path_ / "memory.peak", text, error_number) ||
-            !(events.memory_peak_bytes = number(text)).has_value()) goto diagnostic_failure;
     }
     if (limits_.pids_max) { any = true; if (!read_counter("pids.events", "max", events.pids_max)) goto diagnostic_failure; }
     if (any) result.cgroup_events = events;

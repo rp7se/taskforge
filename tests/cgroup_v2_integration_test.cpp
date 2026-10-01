@@ -66,25 +66,22 @@ void cpu_limit() {
 
 void memory_limit() {
     const auto result = taskforge::run_process(helper({"allocate-touch", "134217728"}),
-                                                options({.memory_max_bytes = 4ULL * 1024 * 1024}));
+                                                options({.memory_max_bytes = 64ULL * 1024 * 1024}));
     require_events(result, "memory diagnostics were unavailable");
-    require(result.cgroup_events->memory_max_bytes == 4ULL * 1024 * 1024,
+    require(result.stdout_data.find("MEMORY_HELPER_STARTED\n") != std::string::npos,
+            "memory helper did not reach user code before the limit was hit");
+    require(result.cgroup_events->memory_max_bytes == 64ULL * 1024 * 1024,
             "memory.max did not retain the requested value");
-    require(result.stdout_data.find("TOUCHED=134217728") != std::string::npos,
-            "memory helper did not touch its requested working set");
     std::cerr << "memory diagnostics: max="
               << result.cgroup_events->memory_max_bytes.value_or(0)
-              << " current=" << result.cgroup_events->memory_current_bytes.value_or(0)
-              << " peak=" << result.cgroup_events->memory_peak_bytes.value_or(0)
               << " oom_kill=" << result.cgroup_events->memory_oom_kill.value_or(0)
               << " max_events=" << result.cgroup_events->memory_max_events.value_or(0)
               << " outcome=" << static_cast<int>(result.outcome)
               << " exit=" << result.exit_code.value_or(-1) << '\n';
     require(!(result.outcome == taskforge::ProcessOutcome::exited && result.exit_code == 0),
             "memory limited task unexpectedly succeeded");
-    require(result.cgroup_events->memory_oom_kill.value_or(0) > 0 ||
-                result.cgroup_events->memory_max_events.value_or(0) > 0,
-            "memory.max did not report kernel enforcement");
+    require(result.cgroup_events->memory_oom_kill.value_or(0) > 0,
+            "memory.max did not report a memcg OOM kill");
     require_clean();
 }
 

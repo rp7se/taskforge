@@ -90,8 +90,6 @@ struct CgroupResourceEvents {
     std::optional<std::uint64_t> memory_oom_kill;
     std::optional<std::uint64_t> memory_max_events;
     std::optional<std::uint64_t> memory_max_bytes;
-    std::optional<std::uint64_t> memory_current_bytes;
-    std::optional<std::uint64_t> memory_peak_bytes;
     std::optional<std::uint64_t> pids_max;
 };
 

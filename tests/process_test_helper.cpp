@@ -104,6 +104,7 @@ int main(int argc, char* argv[]) {
     }
     if (mode == "allocate-touch" && argc == 3) {
         const std::size_t bytes = static_cast<std::size_t>(std::strtoull(argv[2], nullptr, 10));
+        std::cout << "MEMORY_HELPER_STARTED\n" << std::flush;
         auto* allocation = static_cast<volatile unsigned char*>(std::malloc(bytes));
         if (allocation == nullptr) {
             return 8;
