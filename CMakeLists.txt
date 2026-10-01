@@ -30,13 +30,19 @@ add_executable(taskforge src/main.cpp)
 target_link_libraries(taskforge PRIVATE taskforge_lib)
 target_compile_options(taskforge PRIVATE -Wall -Wextra -Wpedantic)
 
+add_executable(taskforge_process_test_helper tests/process_test_helper.cpp)
+target_compile_options(taskforge_process_test_helper PRIVATE -Wall -Wextra -Wpedantic)
+
+add_executable(taskforge_bench bench/taskforge_bench.cpp)
+target_link_libraries(taskforge_bench PRIVATE taskforge_lib Threads::Threads)
+target_compile_definitions(taskforge_bench
+    PRIVATE TASKFORGE_PROCESS_TEST_HELPER="$<TARGET_FILE:taskforge_process_test_helper>")
+target_compile_options(taskforge_bench PRIVATE -Wall -Wextra -Wpedantic)
+
 if(BUILD_TESTING)
     add_executable(taskforge_smoke_test tests/smoke_test.cpp)
     target_link_libraries(taskforge_smoke_test PRIVATE taskforge_lib)
     target_compile_options(taskforge_smoke_test PRIVATE -Wall -Wextra -Wpedantic)
-
-    add_executable(taskforge_process_test_helper tests/process_test_helper.cpp)
-    target_compile_options(taskforge_process_test_helper PRIVATE -Wall -Wextra -Wpedantic)
 
     add_executable(taskforge_process_executor_test tests/process_executor_test.cpp)
     target_link_libraries(taskforge_process_executor_test PRIVATE taskforge_lib)
@@ -70,5 +76,9 @@ if(BUILD_TESTING)
     add_test(NAME taskforge.concurrent_executor COMMAND taskforge_concurrent_executor_test)
     add_test(NAME taskforge.cgroup_v2 COMMAND taskforge_cgroup_v2_test)
     add_test(NAME taskforge.cgroup_v2_integration COMMAND taskforge_cgroup_v2_integration_test)
+    add_test(NAME taskforge.benchmark_launch_smoke
+             COMMAND taskforge_bench --scenario launch --warmup 1 --iterations 3 --format json)
+    add_test(NAME taskforge.benchmark_resource_smoke
+             COMMAND taskforge_bench --scenario resource --tasks 4 --format json)
     set_tests_properties(taskforge.cgroup_v2_integration PROPERTIES SKIP_RETURN_CODE 77)
 endif()
