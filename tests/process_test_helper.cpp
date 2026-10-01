@@ -110,7 +110,9 @@ int main(int argc, char* argv[]) {
         }
         constexpr std::size_t page = 4096;
         for (std::size_t offset = 0; offset < bytes; offset += page) {
-            allocation[offset] = static_cast<unsigned char>(offset);
+            // A non-zero value forces a private physical page rather than
+            // retaining the anonymous shared zero page.
+            allocation[offset] = static_cast<unsigned char>((offset / page) % 251 + 1);
         }
         if (bytes != 0) allocation[bytes - 1] = 1;
         char line[64]{};
