@@ -65,8 +65,8 @@ void cpu_limit() {
 }
 
 void memory_limit() {
-    const auto result = taskforge::run_process(helper({"allocate-touch", "67108864"}),
-                                                options({.memory_max_bytes = 16ULL * 1024 * 1024}));
+    const auto result = taskforge::run_process(helper({"allocate-touch", "134217728"}),
+                                                options({.memory_max_bytes = 8ULL * 1024 * 1024}));
     require_events(result, "memory diagnostics were unavailable");
     require(result.cgroup_events->memory_oom_kill.value_or(0) > 0, "memory.max did not report oom_kill");
     require_clean();

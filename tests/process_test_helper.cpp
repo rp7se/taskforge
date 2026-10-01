@@ -104,7 +104,7 @@ int main(int argc, char* argv[]) {
     }
     if (mode == "allocate-touch" && argc == 3) {
         const std::size_t bytes = static_cast<std::size_t>(std::strtoull(argv[2], nullptr, 10));
-        auto* allocation = static_cast<unsigned char*>(std::malloc(bytes));
+        auto* allocation = static_cast<volatile unsigned char*>(std::malloc(bytes));
         if (allocation == nullptr) {
             return 8;
         }
@@ -114,7 +114,7 @@ int main(int argc, char* argv[]) {
         }
         if (bytes != 0) allocation[bytes - 1] = 1;
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
-        std::free(allocation);
+        std::free(const_cast<unsigned char*>(allocation));
         return 0;
     }
     if (mode == "fork-hold" && argc == 4) {
