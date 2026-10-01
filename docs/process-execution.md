@@ -33,5 +33,6 @@ unknown escaped writer.
 
 Cleanup covers descendants that remain in the task-owned PGID. A process which
 deliberately leaves it with `setsid` or another `setpgid` is not guaranteed
-cleanup. Cgroup containment is not implemented and is the future stronger
-ownership boundary.
+cleanup. Cgroup v2 resource containment is available with an explicit
+delegated root; see [cgroup-v2.md](cgroup-v2.md). It remains separate from
+process-group signal ownership.

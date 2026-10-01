@@ -1,4 +1,5 @@
 #include "taskforge/process_executor.hpp"
+#include "taskforge/cgroup_v2.hpp"
 
 #include <algorithm>
 #include <array>
@@ -141,6 +142,38 @@ void redirect_child_output(int source_fd, int destination_fd, ProcessErrorStage 
     (void)::close(source_fd);
 }
 
+void wait_for_launch_gate(int launch_read_fd, int startup_write_fd) {
+    char token = 0;
+    while (true) {
+        const ssize_t count = ::read(launch_read_fd, &token, 1);
+        if (count == 1 && token == 'G') {
+            (void)::close(launch_read_fd);
+            return;
+        }
+        if (count < 0 && errno == EINTR) {
+            continue;
+        }
+        child_failure(startup_write_fd, ProcessErrorStage::cgroup_attach);
+    }
+}
+
+[[nodiscard]] bool release_launch_gate(UniqueFd& launch_write, ProcessResult& failure) {
+    char token = 'G';
+    while (true) {
+        const ssize_t count = ::write(launch_write.get(), &token, 1);
+        if (count == 1) {
+            launch_write.reset();
+            return true;
+        }
+        if (count < 0 && errno == EINTR) {
+            continue;
+        }
+        failure = parent_failure(ProcessErrorStage::cgroup_attach, count < 0 ? errno : EIO);
+        launch_write.reset();
+        return false;
+    }
+}
+
 [[nodiscard]] bool drain_fd(UniqueFd& fd, std::string& output, ProcessErrorStage stage,
                             ProcessResult& failure) {
     std::array<char, 8192> buffer{};
@@ -225,25 +258,50 @@ ProcessResult run_process(const ProcessSpec& spec, const ProcessExecutionOptions
     if (options.stop_token.stop_requested()) { result.outcome = ProcessOutcome::cancelled; return result; }
     if (deadline && std::chrono::steady_clock::now() >= *deadline) { result.outcome = ProcessOutcome::timed_out; return result; }
 
-    Pipe stdout_pipe, stderr_pipe, startup_pipe;
+    std::optional<CgroupV2Task> cgroup_task;
+    bool cgroup_attached = false;
+    const auto finish = [&](ProcessResult final) {
+        if (cgroup_task) {
+            if (cgroup_attached) {
+                cgroup_task->collect_events(final);
+            }
+            cgroup_task->cleanup(final);
+        }
+        return final;
+    };
+    if (options.cgroup) {
+        cgroup_task = CgroupV2Task::create(*options.cgroup, result);
+        if (!cgroup_task) {
+            return result;
+        }
+    }
+    if (options.stop_token.stop_requested()) { result.outcome = ProcessOutcome::cancelled; return finish(result); }
+    if (deadline && std::chrono::steady_clock::now() >= *deadline) { result.outcome = ProcessOutcome::timed_out; return finish(result); }
+
+    Pipe stdout_pipe, stderr_pipe, startup_pipe, launch_gate;
     if (!make_pipe(stdout_pipe, ProcessErrorStage::create_stdout_pipe, result) ||
         !make_pipe(stderr_pipe, ProcessErrorStage::create_stderr_pipe, result) ||
         !make_pipe(startup_pipe, ProcessErrorStage::create_startup_pipe, result) ||
+        (cgroup_task && !make_pipe(launch_gate, ProcessErrorStage::create_launch_gate, result)) ||
         !set_nonblocking(stdout_pipe.read_end, result) || !set_nonblocking(stderr_pipe.read_end, result) ||
-        !set_nonblocking(startup_pipe.read_end, result)) { return result; }
+        !set_nonblocking(startup_pipe.read_end, result)) { return finish(result); }
     const int stdout_read = stdout_pipe.read_end.get(), stdout_write = stdout_pipe.write_end.get();
     const int stderr_read = stderr_pipe.read_end.get(), stderr_write = stderr_pipe.write_end.get();
     const int startup_read = startup_pipe.read_end.get(), startup_write = startup_pipe.write_end.get();
+    const int launch_read = launch_gate.read_end.get(), launch_write = launch_gate.write_end.get();
     const pid_t child = ::fork();
-    if (child < 0) { return parent_failure(ProcessErrorStage::fork, errno); }
+    if (child < 0) { return finish(parent_failure(ProcessErrorStage::fork, errno)); }
     if (child == 0) {
         (void)::close(stdout_read); (void)::close(stderr_read); (void)::close(startup_read);
+        if (cgroup_task) (void)::close(launch_write);
         if (::setpgid(0, 0) != 0) { child_failure(startup_write, ProcessErrorStage::child_process_group_setup); }
+        if (cgroup_task) wait_for_launch_gate(launch_read, startup_write);
         redirect_child_output(stdout_write, STDOUT_FILENO, ProcessErrorStage::child_dup_stdout, startup_write);
         redirect_child_output(stderr_write, STDERR_FILENO, ProcessErrorStage::child_dup_stderr, startup_write);
         ::execv(executable->c_str(), argv.data());
         child_failure(startup_write, ProcessErrorStage::child_exec);
     }
+    if (cgroup_task) launch_gate.read_end.reset();
     const pid_t task_pgid = child;
     bool process_group_confirmed = false;
     if (::setpgid(child, child) != 0) {
@@ -261,13 +319,32 @@ ProcessResult run_process(const ProcessSpec& spec, const ProcessExecutionOptions
                 observed_child = ::waitpid(child, &ignored_status, WNOHANG);
             } while (observed_child == -1 && errno == EINTR);
             if (observed_child == 0) {
+                launch_gate.write_end.reset();
                 (void)::kill(child, SIGKILL);
                 (void)wait_for_child(child, ignored_status, result);
             }
-            return parent_failure(ProcessErrorStage::parent_process_group_setup, setup_error);
+            return finish(parent_failure(ProcessErrorStage::parent_process_group_setup, setup_error));
         }
     } else {
         process_group_confirmed = true;
+    }
+    if (cgroup_task) {
+        if (!cgroup_task->attach(child, result)) {
+            const ProcessResult attach_failure = result;
+            launch_gate.write_end.reset();
+            (void)::kill(child, SIGKILL);
+            int ignored_status = 0;
+            (void)wait_for_child(child, ignored_status, result);
+            return finish(attach_failure);
+        }
+        cgroup_attached = true;
+        if (!release_launch_gate(launch_gate.write_end, result)) {
+            const ProcessResult gate_failure = result;
+            (void)::kill(child, SIGKILL);
+            int ignored_status = 0;
+            (void)wait_for_child(child, ignored_status, result);
+            return finish(gate_failure);
+        }
     }
     stdout_pipe.write_end.reset(); stderr_pipe.write_end.reset(); startup_pipe.write_end.reset();
 
@@ -339,22 +416,22 @@ ProcessResult run_process(const ProcessSpec& spec, const ProcessExecutionOptions
     }
 
     if (!reaped) {
-        if (!wait_for_child(child, wait_status, result)) return result;
+        if (!wait_for_child(child, wait_status, result)) return finish(result);
         reaped = true;
     }
-    if (!io_ok) return result;
-    if (control == ControlDecision::timed_out) { result.outcome = ProcessOutcome::timed_out; if (WIFSIGNALED(wait_status)) result.terminating_signal = WTERMSIG(wait_status); return result; }
-    if (control == ControlDecision::cancelled) { result.outcome = ProcessOutcome::cancelled; if (WIFSIGNALED(wait_status)) result.terminating_signal = WTERMSIG(wait_status); return result; }
+    if (!io_ok) return finish(result);
+    if (control == ControlDecision::timed_out) { result.outcome = ProcessOutcome::timed_out; if (WIFSIGNALED(wait_status)) result.terminating_signal = WTERMSIG(wait_status); return finish(result); }
+    if (control == ControlDecision::cancelled) { result.outcome = ProcessOutcome::cancelled; if (WIFSIGNALED(wait_status)) result.terminating_signal = WTERMSIG(wait_status); return finish(result); }
     if (!startup_bytes.empty()) {
-        if (startup_bytes.size() != sizeof(StartupMessage)) return parent_failure(ProcessErrorStage::startup_protocol, EPROTO);
+        if (startup_bytes.size() != sizeof(StartupMessage)) return finish(parent_failure(ProcessErrorStage::startup_protocol, EPROTO));
         StartupMessage message{}; std::memcpy(&message, startup_bytes.data(), sizeof(message));
         result.outcome = ProcessOutcome::startup_failed;
         result.error = ProcessError{static_cast<ProcessErrorStage>(message.stage), message.error_number};
-        return result;
+        return finish(result);
     }
-    if (WIFEXITED(wait_status)) { result.outcome = ProcessOutcome::exited; result.exit_code = WEXITSTATUS(wait_status); return result; }
-    if (WIFSIGNALED(wait_status)) { result.outcome = ProcessOutcome::signaled; result.terminating_signal = WTERMSIG(wait_status); return result; }
-    return parent_failure(ProcessErrorStage::parent_waitpid, ECHILD);
+    if (WIFEXITED(wait_status)) { result.outcome = ProcessOutcome::exited; result.exit_code = WEXITSTATUS(wait_status); return finish(result); }
+    if (WIFSIGNALED(wait_status)) { result.outcome = ProcessOutcome::signaled; result.terminating_signal = WTERMSIG(wait_status); return finish(result); }
+    return finish(parent_failure(ProcessErrorStage::parent_waitpid, ECHILD));
 }
 
 }  // namespace taskforge

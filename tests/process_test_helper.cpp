@@ -2,6 +2,7 @@
 #include <chrono>
 #include <cerrno>
 #include <csignal>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
@@ -79,6 +80,66 @@ int main(int argc, char* argv[]) {
     }
     if (mode == "sleep" && argc == 3) {
         std::this_thread::sleep_for(std::chrono::milliseconds(std::atoi(argv[2])));
+        return 0;
+    }
+    if (mode == "cgroup-membership") {
+        std::FILE* membership = std::fopen("/proc/self/cgroup", "r");
+        if (membership == nullptr) {
+            return 6;
+        }
+        char buffer[512]{};
+        while (std::fgets(buffer, sizeof(buffer), membership) != nullptr) {
+            write_all(STDOUT_FILENO, buffer, std::char_traits<char>::length(buffer));
+        }
+        std::fclose(membership);
+        return 0;
+    }
+    if (mode == "cpu-burn" && argc == 3) {
+        const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(std::atoi(argv[2]));
+        volatile std::uint64_t accumulator = 1;
+        while (std::chrono::steady_clock::now() < until) {
+            accumulator = accumulator * 1664525U + 1013904223U;
+        }
+        return accumulator == 0 ? 7 : 0;
+    }
+    if (mode == "allocate-touch" && argc == 3) {
+        const std::size_t bytes = static_cast<std::size_t>(std::strtoull(argv[2], nullptr, 10));
+        auto* allocation = static_cast<unsigned char*>(std::malloc(bytes));
+        if (allocation == nullptr) {
+            return 8;
+        }
+        constexpr std::size_t page = 4096;
+        for (std::size_t offset = 0; offset < bytes; offset += page) {
+            allocation[offset] = static_cast<unsigned char>(offset);
+        }
+        if (bytes != 0) allocation[bytes - 1] = 1;
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        std::free(allocation);
+        return 0;
+    }
+    if (mode == "fork-hold" && argc == 4) {
+        const int requested = std::atoi(argv[2]);
+        const int hold_ms = std::atoi(argv[3]);
+        std::array<pid_t, 64> children{};
+        int created = 0;
+        for (; created < requested && created < static_cast<int>(children.size()); ++created) {
+            const pid_t child = ::fork();
+            if (child == 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
+                _exit(0);
+            }
+            if (child < 0) {
+                break;
+            }
+            children[created] = child;
+        }
+        char line[64]{};
+        const int length = std::snprintf(line, sizeof(line), "CREATED=%d\n", created);
+        write_all(STDOUT_FILENO, line, static_cast<std::size_t>(length));
+        for (int index = 0; index < created; ++index) {
+            while (::waitpid(children[index], nullptr, 0) < 0 && errno == EINTR) {
+            }
+        }
         return 0;
     }
     if (mode == "exit-after" && argc == 4) {

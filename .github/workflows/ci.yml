@@ -16,3 +16,19 @@ jobs:
         run: cmake --build build --parallel
       - name: Test
         run: ctest --test-dir build --output-on-failure
+      - name: cgroup v2 kernel integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs
+          controllers="$(cat /sys/fs/cgroup/cgroup.controllers)"
+          for controller in cpu memory pids; do
+            grep -qw "$controller" <<<"$controllers"
+          done
+          root="/sys/fs/cgroup/taskforge-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cleanup() { sudo rmdir "$root" 2>/dev/null || true; }
+          trap cleanup EXIT
+          sudo mkdir "$root"
+          sudo sh -c "printf '%s' '+cpu +memory +pids' > '$root/cgroup.subtree_control'"
+          sudo env TASKFORGE_CGROUP_TEST_ROOT="$root" \
+            ctest --test-dir build --output-on-failure -R '^taskforge.cgroup_v2_integration$'
