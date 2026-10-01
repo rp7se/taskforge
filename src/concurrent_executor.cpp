@@ -89,23 +89,16 @@ namespace {
 std::atomic<std::uint64_t> next_task_id{1};
 
 ProcessResult cancelled_before_run_result() {
-    return {.stdout_data = {},
-            .stderr_data = {},
-            .outcome = ProcessOutcome::cancelled,
-            .exit_code = std::nullopt,
-            .terminating_signal = std::nullopt,
-            .error = std::nullopt,
-            .cleanup_outcome = ProcessCleanupOutcome::not_needed};
+    ProcessResult result{};
+    result.outcome = ProcessOutcome::cancelled;
+    return result;
 }
 
 ProcessResult invariant_failure_result() {
-    return {.stdout_data = {},
-            .stderr_data = {},
-            .outcome = ProcessOutcome::parent_error,
-            .exit_code = std::nullopt,
-            .terminating_signal = std::nullopt,
-            .error = ProcessError{.stage = ProcessErrorStage::parent_waitpid, .system_error = EPROTO},
-            .cleanup_outcome = ProcessCleanupOutcome::not_needed};
+    ProcessResult result{};
+    result.outcome = ProcessOutcome::parent_error;
+    result.error = ProcessError{.stage = ProcessErrorStage::parent_waitpid, .system_error = EPROTO};
+    return result;
 }
 
 TaskState terminal_state_for(const ProcessResult& result) noexcept {
