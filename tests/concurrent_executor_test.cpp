@@ -510,6 +510,9 @@ void test_resource_submit_shutdown_race() {
         }
         gate.arrive_and_wait();
         executor.shutdown();
+        for (auto& producer : producers) {
+            producer.join();
+        }
         for (const auto& submission : submissions) {
             require(submission.status == taskforge::SubmitStatus::accepted ||
                         submission.status == taskforge::SubmitStatus::queue_full ||
