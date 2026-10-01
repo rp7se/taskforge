@@ -33,11 +33,22 @@ output retention, and deterministic mixed-workload completion accounting. It
 uses fixed workloads and correctness invariants; CI runs only short structural
 smoke scenarios and has no timing threshold.
 
-Latest local Release results (WSL2, Ryzen 9 8945HX, 32 logical CPUs) measured
-launch p50/p95 of 21,314/21,604 us and 1/2/4/8-worker throughput of
-21.48/42.90/85.62/163.93 tasks/s for the fixed 25 ms workload. Resource
-admission limited the 2000m/1000m workload to two concurrent tasks; a 300-task
-mixed stress run completed every accepted task with unique IDs.
+The following are local Release observations for the documented WSL2
+environment and fixed workloads; they are not cross-machine performance claims
+or CI timing gates.
+
+| Scenario | Configuration | Result |
+| --- | --- | --- |
+| Process launch | 100 measured helper exit-zero runs | p50 21,314 us; p95 21,604 us |
+| Worker throughput | 100 tasks; fixed 25 ms workload | 1/2/4/8 workers: 21.48/42.90/85.62/163.93 tasks/s |
+| CPU admission | 4 workers; 2000m capacity; 1000m/task | observed max running 2 |
+| Queue backpressure | 2 workers; queue capacity 8; burst 32 | accepted 10; queue_full 24; completed 10 |
+| Bounded output | 16 MiB stdout + 16 MiB stderr generated/drained and accounted | stdout total 16,777,216 bytes; stderr total 16,777,216 bytes; stdout/stderr retained 65,536 bytes each |
+| Mixed stress | 300 accepted deterministic tasks | completed 300: 200 success, 50 failed, 25 timed out, 25 cancelled; unique IDs |
+
+The bounded-output row describes retained stdout/stderr payload, not TaskForge
+RSS: each stream retained 64 KiB while 16 MiB per stream was drained and
+accounted.
 
 ```sh
 cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release
