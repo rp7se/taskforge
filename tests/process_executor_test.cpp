@@ -31,6 +31,12 @@ taskforge::ProcessResult run_helper(
                                   options);
 }
 
+taskforge::ProcessExecutionOptions bounded(std::uint64_t stdout_bytes,
+                                           std::uint64_t stderr_bytes) {
+    return {.output_capture_limits = taskforge::OutputCaptureLimits{
+                .stdout_bytes = stdout_bytes, .stderr_bytes = stderr_bytes}};
+}
+
 void require_exit(const taskforge::ProcessResult& result, int exit_code);
 
 void require_control_result(const taskforge::ProcessResult& result,
@@ -200,6 +206,123 @@ void test_output_before_timeout() {
     require(result.stderr_data == "before timeout stderr\n", "stderr before timeout was lost");
 }
 
+void test_bounded_capture_boundaries_and_zero() {
+    {
+        const auto result = run_helper({"write-bytes", "stdout", "7"}, bounded(16, 16));
+        require_exit(result, 0);
+        require(result.stdout_data.size() == 7 && result.stdout_total_bytes == 7 &&
+                    !result.stdout_truncated,
+                "small stdout under limit was not retained exactly");
+    }
+    {
+        const auto result = run_helper({"write-bytes", "stderr", "7"}, bounded(16, 16));
+        require_exit(result, 0);
+        require(result.stderr_data.size() == 7 && result.stderr_total_bytes == 7 &&
+                    !result.stderr_truncated,
+                "small stderr under limit was not retained exactly");
+    }
+    {
+        const auto exact_stdout = run_helper({"write-bytes", "stdout", "13"}, bounded(13, 1));
+        const auto plus_stdout = run_helper({"write-bytes", "stdout", "14"}, bounded(13, 1));
+        const auto exact_stderr = run_helper({"write-bytes", "stderr", "9"}, bounded(1, 9));
+        const auto plus_stderr = run_helper({"write-bytes", "stderr", "10"}, bounded(1, 9));
+        require(exact_stdout.stdout_data.size() == 13 && exact_stdout.stdout_total_bytes == 13 &&
+                    !exact_stdout.stdout_truncated,
+                "exact stdout boundary was marked truncated");
+        require(plus_stdout.stdout_data.size() == 13 && plus_stdout.stdout_total_bytes == 14 &&
+                    plus_stdout.stdout_truncated,
+                "stdout limit-plus-one did not retain prefix and diagnose truncation");
+        require(exact_stderr.stderr_data.size() == 9 && exact_stderr.stderr_total_bytes == 9 &&
+                    !exact_stderr.stderr_truncated,
+                "exact stderr boundary was marked truncated");
+        require(plus_stderr.stderr_data.size() == 9 && plus_stderr.stderr_total_bytes == 10 &&
+                    plus_stderr.stderr_truncated,
+                "stderr limit-plus-one did not retain prefix and diagnose truncation");
+    }
+    {
+        const auto result = run_helper({"dual-write", "31", "29"}, bounded(0, 0));
+        require_exit(result, 0);
+        require(result.stdout_data.empty() && result.stderr_data.empty() &&
+                    result.stdout_total_bytes == 31 && result.stderr_total_bytes == 29 &&
+                    result.stdout_truncated && result.stderr_truncated,
+                "zero capture limits did not drain and account for both streams");
+    }
+}
+
+void test_independent_large_and_binary_capture() {
+    constexpr std::uint64_t mib = 1024U * 1024U;
+    {
+        const auto result = run_helper({"dual-write", "200", "200"}, bounded(64, 17));
+        require_exit(result, 0);
+        require(result.stdout_data.size() == 64 && result.stderr_data.size() == 17 &&
+                    result.stdout_total_bytes == 200 && result.stderr_total_bytes == 200 &&
+                    result.stdout_truncated && result.stderr_truncated,
+                "stdout and stderr limits were not independent");
+    }
+    {
+        const auto result = run_helper({"write-bytes", "stdout", "8388608"}, bounded(64 * 1024, 64 * 1024));
+        require_exit(result, 0);
+        require(result.stdout_data.size() == 64 * 1024 && result.stdout_total_bytes == 8 * mib &&
+                    result.stdout_truncated,
+                "large stdout was not fully drained with bounded prefix capture");
+    }
+    {
+        const auto result = run_helper({"write-bytes", "stderr", "8388608"}, bounded(64 * 1024, 64 * 1024));
+        require_exit(result, 0);
+        require(result.stderr_data.size() == 64 * 1024 && result.stderr_total_bytes == 8 * mib &&
+                    result.stderr_truncated,
+                "large stderr was not fully drained with bounded prefix capture");
+    }
+    {
+        const auto result = run_helper({"dual-write", "8388608", "8388608"}, bounded(32 * 1024, 16 * 1024));
+        require_exit(result, 0);
+        require(result.stdout_data.size() == 32 * 1024 && result.stderr_data.size() == 16 * 1024 &&
+                    result.stdout_total_bytes == 8 * mib && result.stderr_total_bytes == 8 * mib &&
+                    result.stdout_truncated && result.stderr_truncated,
+                "large dual-stream output deadlocked or exceeded bounded capture");
+    }
+    {
+        const auto result = run_helper({"binary-stdout", "17"}, bounded(10, 1));
+        require_exit(result, 0);
+        require(result.stdout_data.size() == 10 && result.stdout_total_bytes == 17 &&
+                    result.stdout_truncated && result.stdout_data[1] == '\0' &&
+                    result.stdout_data[5] == '\0',
+                "binary NUL output was not captured as bytes");
+    }
+}
+
+void test_timeout_and_cancellation_with_bounded_output() {
+    {
+        auto options = bounded(1024, 1024);
+        options.timeout = std::chrono::milliseconds(100);
+        options.termination_grace = std::chrono::milliseconds(30);
+        const auto result = run_helper({"write-then-sleep", "262144", "262144", "500"}, options);
+        require_control_result(result, taskforge::ProcessOutcome::timed_out);
+        require(result.stdout_data.size() <= 1024 && result.stderr_data.size() <= 1024 &&
+                    result.stdout_total_bytes >= result.stdout_data.size() &&
+                    result.stderr_total_bytes >= result.stderr_data.size() &&
+                    result.stdout_truncated && result.stderr_truncated,
+                "timeout did not preserve bounded truncated capture");
+    }
+    {
+        std::stop_source source;
+        std::jthread canceller([&source] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            source.request_stop();
+        });
+        auto options = bounded(1024, 1024);
+        options.stop_token = source.get_token();
+        options.termination_grace = std::chrono::milliseconds(30);
+        const auto result = run_helper({"write-then-sleep", "262144", "262144", "500"}, options);
+        require_control_result(result, taskforge::ProcessOutcome::cancelled);
+        require(result.stdout_data.size() <= 1024 && result.stderr_data.size() <= 1024 &&
+                    result.stdout_total_bytes >= result.stdout_data.size() &&
+                    result.stderr_total_bytes >= result.stderr_data.size() &&
+                    result.stdout_truncated && result.stderr_truncated,
+                "cancellation did not preserve bounded truncated capture");
+    }
+}
+
 void require_exit(const taskforge::ProcessResult& result, int exit_code) {
     require(result.outcome == taskforge::ProcessOutcome::exited, "expected normal exit");
     require(result.exit_code == exit_code, "unexpected exit code");
@@ -245,13 +368,26 @@ int main() {
             "missing executable failed at the wrong stage");
     require(missing_result.error->system_error == ENOENT, "missing executable has wrong errno");
 
+    const auto bounded_missing_result = taskforge::run_process(
+        {.executable = "/definitely/not/a/taskforge-executable", .arguments = {}}, bounded(0, 0));
+    require(bounded_missing_result.outcome == taskforge::ProcessOutcome::startup_failed &&
+                bounded_missing_result.error.has_value() &&
+                bounded_missing_result.error->stage == taskforge::ProcessErrorStage::child_exec,
+            "zero output limits altered startup failure diagnostics");
+
     const auto exit_127_result = run_helper({"exit", "127"});
     require_exit(exit_127_result, 127);
+    const auto bounded_exit_127_result = run_helper({"exit", "127"}, bounded(0, 0));
+    require_exit(bounded_exit_127_result, 127);
 
     const auto both_result = run_helper({"both"});
     require_exit(both_result, 0);
     require(both_result.stdout_data.size() == 128U * 1024U, "stdout drain was incomplete");
     require(both_result.stderr_data.size() == 128U * 1024U, "stderr drain was incomplete");
+    require(both_result.stdout_total_bytes == 128U * 1024U &&
+                both_result.stderr_total_bytes == 128U * 1024U &&
+                !both_result.stdout_truncated && !both_result.stderr_truncated,
+            "legacy unlimited capture accounting changed");
 
     test_timeout();
     test_manual_cancellation();
@@ -261,6 +397,9 @@ int main() {
     test_process_group_cleanup();
     test_natural_exit_and_multiple_descendants();
     test_cancel_cleans_descendant();
+    test_bounded_capture_boundaries_and_zero();
+    test_independent_large_and_binary_capture();
+    test_timeout_and_cancellation_with_bounded_output();
 
     return 0;
 }
