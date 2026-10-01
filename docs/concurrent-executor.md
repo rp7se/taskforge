@@ -44,6 +44,8 @@ holding the queue mutex. It is idempotent, and the destructor calls it safely.
 
 ## Limitations
 
-This phase intentionally has no blocking submit, priority scheduling, resource-aware admission,
-CPU or memory reservations, cgroup admission, retry, DAG execution, persistent task registry,
-dynamic worker resizing, work stealing, or distributed execution.
+See [resource admission](resource-admission.md) for the optional explicit CPU/memory admission
+mode added in Phase 7. It uses the same bounded FIFO queue and is separate from cgroup kernel
+enforcement. This executor intentionally has no blocking submit, priority scheduling, preemption,
+backfill, overcommit, retry, DAG execution, persistent task registry, dynamic worker resizing,
+work stealing, or distributed execution.
