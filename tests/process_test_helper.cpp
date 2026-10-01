@@ -8,6 +8,8 @@
 #include <iostream>
 #include <string_view>
 #include <thread>
+#include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -105,22 +107,40 @@ int main(int argc, char* argv[]) {
     if (mode == "allocate-touch" && argc == 3) {
         const std::size_t bytes = static_cast<std::size_t>(std::strtoull(argv[2], nullptr, 10));
         std::cout << "MEMORY_HELPER_STARTED\n" << std::flush;
-        auto* allocation = static_cast<volatile unsigned char*>(std::malloc(bytes));
-        if (allocation == nullptr) {
+        const rlimit unlimited_memlock{RLIM_INFINITY, RLIM_INFINITY};
+        if (::setrlimit(RLIMIT_MEMLOCK, &unlimited_memlock) != 0) {
+            std::perror("MEMORY_HELPER_SETMEMLOCK");
             return 8;
         }
+        void* mapping = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE,
+                               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (mapping == MAP_FAILED) {
+            return 8;
+        }
+        auto* allocation = static_cast<volatile unsigned char*>(mapping);
         constexpr std::size_t page = 4096;
-        for (std::size_t offset = 0; offset < bytes; offset += page) {
-            // A non-zero value forces a private physical page rather than
-            // retaining the anonymous shared zero page.
-            allocation[offset] = static_cast<unsigned char>((offset / page) % 251 + 1);
+        constexpr std::size_t lock_chunk = 1024 * 1024;
+        for (std::size_t chunk_offset = 0; chunk_offset < bytes; chunk_offset += lock_chunk) {
+            const std::size_t chunk_size = bytes - chunk_offset < lock_chunk ? bytes - chunk_offset : lock_chunk;
+            for (std::size_t offset = chunk_offset; offset < chunk_offset + chunk_size; offset += page) {
+                // A non-zero value forces a private physical page rather than
+                // retaining the anonymous shared zero page.
+                allocation[offset] = static_cast<unsigned char>((offset / page) % 251 + 1);
+            }
+            // Keep already-grown pages resident.  Otherwise a swap-enabled
+            // runner can reclaim them and avoid the memcg OOM path entirely.
+            if (::mlock(const_cast<unsigned char*>(allocation) + chunk_offset, chunk_size) != 0) {
+                std::perror("MEMORY_HELPER_MLOCK");
+                (void)::munmap(const_cast<unsigned char*>(allocation), bytes);
+                return 9;
+            }
         }
         if (bytes != 0) allocation[bytes - 1] = 1;
         char line[64]{};
         const int length = std::snprintf(line, sizeof(line), "TOUCHED=%zu\n", bytes);
         write_all(STDOUT_FILENO, line, static_cast<std::size_t>(length));
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
-        std::free(const_cast<unsigned char*>(allocation));
+        (void)::munmap(const_cast<unsigned char*>(allocation), bytes);
         return 0;
     }
     if (mode == "fork-hold" && argc == 4) {
