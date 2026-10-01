@@ -36,3 +36,30 @@ jobs:
           sudo sh -c "printf '%s' '+cpu +memory +pids' > '$root/cgroup.subtree_control'"
           sudo env TASKFORGE_CGROUP_TEST_ROOT="$root" \
             ctest --test-dir build --output-on-failure -R '^taskforge.cgroup_v2_integration$'
+
+  asan-ubsan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DTASKFORGE_ENABLE_ASAN_UBSAN=ON
+      - name: Build
+        run: cmake --build build-asan --parallel
+      - name: Test non-privileged registry
+        env:
+          ASAN_OPTIONS: halt_on_error=1:abort_on_error=1:detect_leaks=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: ctest --test-dir build-asan --output-on-failure -E '^taskforge.cgroup_v2_integration$'
+
+  tsan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DTASKFORGE_ENABLE_TSAN=ON
+      - name: Build
+        run: cmake --build build-tsan --parallel
+      - name: Test parent-process concurrency
+        env:
+          TSAN_OPTIONS: halt_on_error=1
+        run: ctest --test-dir build-tsan --output-on-failure -R '^(taskforge.task_state|taskforge.concurrent_executor)$'

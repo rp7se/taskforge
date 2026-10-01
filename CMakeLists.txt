@@ -6,6 +6,66 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+option(TASKFORGE_ENABLE_ASAN_UBSAN "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+option(TASKFORGE_ENABLE_TSAN "Enable ThreadSanitizer" OFF)
+
+if(TASKFORGE_ENABLE_ASAN_UBSAN AND TASKFORGE_ENABLE_TSAN)
+    message(FATAL_ERROR
+        "TASKFORGE_ENABLE_ASAN_UBSAN and TASKFORGE_ENABLE_TSAN cannot both be ON")
+endif()
+
+add_library(taskforge_sanitizers INTERFACE)
+
+if(TASKFORGE_ENABLE_ASAN_UBSAN OR TASKFORGE_ENABLE_TSAN)
+    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        message(FATAL_ERROR
+            "TaskForge sanitizers require a GNU or Clang C++ compiler; found ${CMAKE_CXX_COMPILER_ID}")
+    endif()
+
+    include(CheckCXXCompilerFlag)
+
+    if(TASKFORGE_ENABLE_ASAN_UBSAN)
+        set(_taskforge_saved_required_link_options "${CMAKE_REQUIRED_LINK_OPTIONS}")
+        set(CMAKE_REQUIRED_LINK_OPTIONS "-fsanitize=address,undefined")
+        check_cxx_compiler_flag("-fsanitize=address,undefined"
+            TASKFORGE_COMPILER_SUPPORTS_ASAN_UBSAN)
+        set(CMAKE_REQUIRED_LINK_OPTIONS "${_taskforge_saved_required_link_options}")
+        if(NOT TASKFORGE_COMPILER_SUPPORTS_ASAN_UBSAN)
+            message(FATAL_ERROR
+                "TASKFORGE_ENABLE_ASAN_UBSAN requires compiler support for -fsanitize=address,undefined")
+        endif()
+
+        target_compile_options(taskforge_sanitizers INTERFACE
+            -fsanitize=address,undefined
+            -fno-omit-frame-pointer
+            -fno-sanitize-recover=all)
+        target_link_options(taskforge_sanitizers INTERFACE
+            -fsanitize=address,undefined
+            -fno-omit-frame-pointer
+            -fno-sanitize-recover=all)
+    endif()
+
+    if(TASKFORGE_ENABLE_TSAN)
+        set(_taskforge_saved_required_link_options "${CMAKE_REQUIRED_LINK_OPTIONS}")
+        set(CMAKE_REQUIRED_LINK_OPTIONS "-fsanitize=thread")
+        check_cxx_compiler_flag("-fsanitize=thread" TASKFORGE_COMPILER_SUPPORTS_TSAN)
+        set(CMAKE_REQUIRED_LINK_OPTIONS "${_taskforge_saved_required_link_options}")
+        if(NOT TASKFORGE_COMPILER_SUPPORTS_TSAN)
+            message(FATAL_ERROR
+                "TASKFORGE_ENABLE_TSAN requires compiler support for -fsanitize=thread")
+        endif()
+
+        target_compile_options(taskforge_sanitizers INTERFACE
+            -fsanitize=thread
+            -fno-omit-frame-pointer
+            -fno-pie)
+        target_link_options(taskforge_sanitizers INTERFACE
+            -fsanitize=thread
+            -fno-omit-frame-pointer
+            -no-pie)
+    endif()
+endif()
+
 include(CTest)
 find_package(Threads REQUIRED)
 
@@ -23,7 +83,7 @@ target_include_directories(taskforge_lib
 )
 
 target_compile_features(taskforge_lib PUBLIC cxx_std_20)
-target_link_libraries(taskforge_lib PUBLIC Threads::Threads)
+target_link_libraries(taskforge_lib PUBLIC Threads::Threads taskforge_sanitizers)
 target_compile_options(taskforge_lib PRIVATE -Wall -Wextra -Wpedantic)
 
 add_executable(taskforge src/main.cpp)
@@ -31,6 +91,7 @@ target_link_libraries(taskforge PRIVATE taskforge_lib)
 target_compile_options(taskforge PRIVATE -Wall -Wextra -Wpedantic)
 
 add_executable(taskforge_process_test_helper tests/process_test_helper.cpp)
+target_link_libraries(taskforge_process_test_helper PRIVATE taskforge_sanitizers)
 target_compile_options(taskforge_process_test_helper PRIVATE -Wall -Wextra -Wpedantic)
 
 add_executable(taskforge_bench bench/taskforge_bench.cpp)

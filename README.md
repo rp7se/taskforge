@@ -25,6 +25,12 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
+## Sanitizer / Hardening
+
+Optional ASan+UBSan and TSan builds are maintained separately from the normal
+build. See [the sanitizer hardening guide](docs/sanitizers.md) for local
+commands, test scope, and the fork/exec caveat.
+
 ## Benchmark
 
 Phase 9 adds a reproducible Release-only evaluation harness for launch latency,
