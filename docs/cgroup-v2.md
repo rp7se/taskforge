@@ -41,7 +41,8 @@ crawler, or a subreaper in this phase.
 
 After direct-child and process-group cleanup, TaskForge reads requested
 controller counters into `ProcessResult::cgroup_events`: `cpu.stat`
-`nr_throttled`, `memory.events` `oom_kill` and `max`, and `pids.events` `max`. These are
+`nr_throttled`, `memory.events` `oom_kill` and `max` (plus the effective
+`memory.max`), and `pids.events` `max`. These are
 orthogonal to `ProcessOutcome`; for example an OOM-killed task normally remains
 `signaled` while reporting `memory_oom_kill`.
 

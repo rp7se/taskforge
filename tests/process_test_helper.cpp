@@ -113,6 +113,9 @@ int main(int argc, char* argv[]) {
             allocation[offset] = static_cast<unsigned char>(offset);
         }
         if (bytes != 0) allocation[bytes - 1] = 1;
+        char line[64]{};
+        const int length = std::snprintf(line, sizeof(line), "TOUCHED=%zu\n", bytes);
+        write_all(STDOUT_FILENO, line, static_cast<std::size_t>(length));
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
         std::free(const_cast<unsigned char*>(allocation));
         return 0;

@@ -93,6 +93,17 @@ std::optional<std::uint64_t> counter(std::string_view text, std::string_view key
     return std::nullopt;
 }
 
+std::optional<std::uint64_t> number(std::string_view text) {
+    const std::size_t first = text.find_first_not_of(" \t\n");
+    if (first == std::string_view::npos) return std::nullopt;
+    const std::size_t last = text.find_last_not_of(" \t\n");
+    std::uint64_t value = 0;
+    const char* begin = text.data() + first;
+    const char* end = text.data() + last + 1;
+    const auto [parsed, error] = std::from_chars(begin, end, value);
+    return error == std::errc{} && parsed == end ? std::optional(value) : std::nullopt;
+}
+
 bool valid_limits(const CgroupV2Limits& limits, ProcessResult& result) {
     if ((limits.cpu && (limits.cpu->quota_us == 0 || limits.cpu->period_us == 0)) ||
         (limits.memory_max_bytes && *limits.memory_max_bytes == 0) ||
@@ -228,7 +239,9 @@ void CgroupV2Task::collect_events(ProcessResult& result) const {
     if (limits_.memory_max_bytes) {
         any = true;
         if (!read_counter("memory.events", "oom_kill", events.memory_oom_kill) ||
-            !read_counter("memory.events", "max", events.memory_max)) goto diagnostic_failure;
+            !read_counter("memory.events", "max", events.memory_max_events)) goto diagnostic_failure;
+        if (!read_text(path_ / "memory.max", text, error_number) ||
+            !(events.memory_max_bytes = number(text)).has_value()) goto diagnostic_failure;
     }
     if (limits_.pids_max) { any = true; if (!read_counter("pids.events", "max", events.pids_max)) goto diagnostic_failure; }
     if (any) result.cgroup_events = events;

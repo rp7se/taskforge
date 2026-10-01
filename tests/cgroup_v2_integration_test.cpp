@@ -68,10 +68,14 @@ void memory_limit() {
     const auto result = taskforge::run_process(helper({"allocate-touch", "134217728"}),
                                                 options({.memory_max_bytes = 8ULL * 1024 * 1024}));
     require_events(result, "memory diagnostics were unavailable");
+    require(result.cgroup_events->memory_max_bytes == 8ULL * 1024 * 1024,
+            "memory.max did not retain the requested value");
+    require(result.stdout_data.find("TOUCHED=134217728") != std::string::npos,
+            "memory helper did not touch its requested working set");
     require(!(result.outcome == taskforge::ProcessOutcome::exited && result.exit_code == 0),
             "memory limited task unexpectedly succeeded");
     require(result.cgroup_events->memory_oom_kill.value_or(0) > 0 ||
-                result.cgroup_events->memory_max.value_or(0) > 0,
+                result.cgroup_events->memory_max_events.value_or(0) > 0,
             "memory.max did not report kernel enforcement");
     require_clean();
 }
