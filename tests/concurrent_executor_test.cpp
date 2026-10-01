@@ -267,9 +267,19 @@ void test_queued_cancellation() {
 
     require_success(first, "queued-cancellation guard task");
     require_ready(queued, "queued cancellation task");
-    require(queued.get().outcome == taskforge::ProcessOutcome::cancelled,
+    const auto& queued_result = queued.get();
+    require(queued_result.outcome == taskforge::ProcessOutcome::cancelled,
             "queued cancellation did not produce cancelled result");
-    require(queued.get().stdout_data.empty(), "queued cancellation invoked the stdout helper");
+    require(queued_result.stdout_data.empty() && queued_result.stderr_data.empty() &&
+                queued_result.stdout_total_bytes == 0 && queued_result.stderr_total_bytes == 0 &&
+                !queued_result.stdout_truncated && !queued_result.stderr_truncated &&
+                !queued_result.exit_code.has_value() && !queued_result.terminating_signal.has_value() &&
+                !queued_result.error.has_value() &&
+                queued_result.cleanup_outcome == taskforge::ProcessCleanupOutcome::not_needed &&
+                !queued_result.cgroup_events.has_value() &&
+                !queued_result.cgroup_diagnostic_error.has_value() &&
+                !queued_result.cgroup_cleanup_error.has_value(),
+            "queued cancellation result defaults changed");
     require(queued.state() == taskforge::TaskState::cancelled,
             "queued cancellation did not map to cancelled");
 }
