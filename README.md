@@ -31,6 +31,13 @@ Optional ASan+UBSan and TSan builds are maintained separately from the normal
 build. See [the sanitizer hardening guide](docs/sanitizers.md) for local
 commands, test scope, and the fork/exec caveat.
 
+## Portability / Quality gates
+
+CI validates GCC and Clang builds, treats warnings as errors for production
+targets, and retains ASan/UBSan, TSan, and real cgroup integration gates. See
+[the compiler portability guide](docs/compiler-portability.md) and
+[the sanitizer hardening guide](docs/sanitizers.md).
+
 ## Benchmark
 
 Phase 9 adds a reproducible Release-only evaluation harness for launch latency,

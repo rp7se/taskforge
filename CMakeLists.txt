@@ -8,6 +8,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(TASKFORGE_ENABLE_ASAN_UBSAN "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 option(TASKFORGE_ENABLE_TSAN "Enable ThreadSanitizer" OFF)
+option(TASKFORGE_WARNINGS_AS_ERRORS "Treat TaskForge production warnings as errors" OFF)
 
 if(TASKFORGE_ENABLE_ASAN_UBSAN AND TASKFORGE_ENABLE_TSAN)
     message(FATAL_ERROR
@@ -89,6 +90,16 @@ target_compile_options(taskforge_lib PRIVATE -Wall -Wextra -Wpedantic)
 add_executable(taskforge src/main.cpp)
 target_link_libraries(taskforge PRIVATE taskforge_lib)
 target_compile_options(taskforge PRIVATE -Wall -Wextra -Wpedantic)
+
+if(TASKFORGE_WARNINGS_AS_ERRORS)
+    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        message(FATAL_ERROR
+            "TASKFORGE_WARNINGS_AS_ERRORS requires a GNU or Clang C++ compiler; found ${CMAKE_CXX_COMPILER_ID}")
+    endif()
+
+    target_compile_options(taskforge_lib PRIVATE -Werror)
+    target_compile_options(taskforge PRIVATE -Werror)
+endif()
 
 add_executable(taskforge_process_test_helper tests/process_test_helper.cpp)
 target_link_libraries(taskforge_process_test_helper PRIVATE taskforge_sanitizers)
