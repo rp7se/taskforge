@@ -66,9 +66,9 @@ void cpu_limit() {
 
 void memory_limit() {
     const auto result = taskforge::run_process(helper({"allocate-touch", "134217728"}),
-                                                options({.memory_max_bytes = 8ULL * 1024 * 1024}));
+                                                options({.memory_max_bytes = 4ULL * 1024 * 1024}));
     require_events(result, "memory diagnostics were unavailable");
-    require(result.cgroup_events->memory_max_bytes == 8ULL * 1024 * 1024,
+    require(result.cgroup_events->memory_max_bytes == 4ULL * 1024 * 1024,
             "memory.max did not retain the requested value");
     require(result.stdout_data.find("TOUCHED=134217728") != std::string::npos,
             "memory helper did not touch its requested working set");
