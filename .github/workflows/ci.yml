@@ -25,6 +25,10 @@ jobs:
           for controller in cpu memory pids; do
             grep -qw "$controller" <<<"$controllers"
           done
+          # Hosted runners may expose controllers at the cgroup root without
+          # delegating them to children. Enable only the three Phase 6
+          # controllers before creating this workflow-scoped subtree.
+          sudo sh -c "printf '%s' '+cpu +memory +pids' > /sys/fs/cgroup/cgroup.subtree_control"
           root="/sys/fs/cgroup/taskforge-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           cleanup() { sudo rmdir "$root" 2>/dev/null || true; }
           trap cleanup EXIT
