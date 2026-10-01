@@ -13,6 +13,8 @@ Taskforge is a C++20 project built with CMake.
   memory, and PID limits)
 - Phase 7: Resource-Aware Admission (explicit CPU/memory reservations, atomic
   FIFO admission/release, and drain-safe bounded queue integration)
+- Phase 8: Bounded Output Capture (independent stdout/stderr prefix limits,
+  drained-byte accounting, and truncation diagnostics)
 
 ## Build and test
 

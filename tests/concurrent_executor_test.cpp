@@ -520,6 +520,21 @@ void test_resource_submit_shutdown_race() {
     }
 }
 
+void test_bounded_output_options_pass_through_concurrent_executor() {
+    taskforge::ConcurrentExecutor executor(1, 2);
+    auto task = take_accepted(executor.submit(
+        helper({"dual-write", "100", "100"}),
+        {.output_capture_limits = taskforge::OutputCaptureLimits{.stdout_bytes = 11,
+                                                                  .stderr_bytes = 7}}));
+    require_ready(task, "bounded-output concurrent task did not complete");
+    const auto& result = task.get();
+    require(result.outcome == taskforge::ProcessOutcome::exited && result.exit_code == 0 &&
+                result.stdout_data.size() == 11 && result.stderr_data.size() == 7 &&
+                result.stdout_total_bytes == 100 && result.stderr_total_bytes == 100 &&
+                result.stdout_truncated && result.stderr_truncated,
+            "ConcurrentExecutor did not pass bounded output options to run_process");
+}
+
 }  // namespace
 
 int main() {
@@ -540,5 +555,6 @@ int main() {
     test_shutdown_drains_resource_blocked_queue();
     test_atomic_reservation_race();
     test_resource_submit_shutdown_race();
+    test_bounded_output_options_pass_through_concurrent_executor();
     return 0;
 }

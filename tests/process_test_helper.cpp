@@ -21,14 +21,46 @@ int spawned_count = 0;
 
 void note_term(int) { term_received = 1; }
 
-void write_all(int fd, const char* data, std::size_t size) {
+bool write_all(int fd, const char* data, std::size_t size) {
     std::size_t written = 0;
     while (written < size) {
         const ssize_t count = ::write(fd, data + written, size - written);
         if (count > 0) {
             written += static_cast<std::size_t>(count);
+        } else if (count < 0 && errno == EINTR) {
+            continue;
+        } else {
+            return false;
         }
     }
+    return true;
+}
+
+bool write_repeated(int fd, std::uint64_t bytes, char value) {
+    std::array<char, 4096> block{};
+    block.fill(value);
+    while (bytes > 0) {
+        const std::size_t count = static_cast<std::size_t>(
+            bytes < block.size() ? bytes : static_cast<std::uint64_t>(block.size()));
+        if (!write_all(fd, block.data(), count)) {
+            return false;
+        }
+        bytes -= count;
+    }
+    return true;
+}
+
+bool write_binary(int fd, std::uint64_t bytes) {
+    const std::array<char, 8> pattern{'A', '\0', 'B', '\x7f', 'C', '\0', 'D', '\n'};
+    while (bytes > 0) {
+        const std::size_t count = static_cast<std::size_t>(
+            bytes < pattern.size() ? bytes : static_cast<std::uint64_t>(pattern.size()));
+        if (!write_all(fd, pattern.data(), count)) {
+            return false;
+        }
+        bytes -= count;
+    }
+    return true;
 }
 
 }  // namespace
@@ -78,6 +110,38 @@ int main(int argc, char* argv[]) {
             write_all(STDOUT_FILENO, stdout_block.data(), stdout_block.size());
             write_all(STDERR_FILENO, stderr_block.data(), stderr_block.size());
         }
+        return 0;
+    }
+    if (mode == "write-bytes" && argc == 4) {
+        const std::uint64_t bytes = std::strtoull(argv[3], nullptr, 10);
+        const std::string_view stream = argv[2];
+        if (stream == "stdout") {
+            return write_repeated(STDOUT_FILENO, bytes, 'o') ? 0 : 7;
+        }
+        if (stream == "stderr") {
+            return write_repeated(STDERR_FILENO, bytes, 'e') ? 0 : 7;
+        }
+        return 5;
+    }
+    if (mode == "dual-write" && argc == 4) {
+        const std::uint64_t stdout_bytes = std::strtoull(argv[2], nullptr, 10);
+        const std::uint64_t stderr_bytes = std::strtoull(argv[3], nullptr, 10);
+        return write_repeated(STDOUT_FILENO, stdout_bytes, 'o') &&
+                       write_repeated(STDERR_FILENO, stderr_bytes, 'e')
+                   ? 0
+                   : 7;
+    }
+    if (mode == "binary-stdout" && argc == 3) {
+        return write_binary(STDOUT_FILENO, std::strtoull(argv[2], nullptr, 10)) ? 0 : 7;
+    }
+    if (mode == "write-then-sleep" && argc == 5) {
+        const std::uint64_t stdout_bytes = std::strtoull(argv[2], nullptr, 10);
+        const std::uint64_t stderr_bytes = std::strtoull(argv[3], nullptr, 10);
+        if (!write_repeated(STDOUT_FILENO, stdout_bytes, 'o') ||
+            !write_repeated(STDERR_FILENO, stderr_bytes, 'e')) {
+            return 7;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(std::atoi(argv[4])));
         return 0;
     }
     if (mode == "sleep" && argc == 3) {

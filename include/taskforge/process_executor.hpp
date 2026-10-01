@@ -93,9 +93,20 @@ struct CgroupResourceEvents {
     std::optional<std::uint64_t> pids_max;
 };
 
+struct OutputCaptureLimits {
+    std::uint64_t stdout_bytes;
+    std::uint64_t stderr_bytes;
+};
+
 struct ProcessResult {
     std::string stdout_data;
     std::string stderr_data;
+    // Bytes drained from the child pipes, including bytes not retained after a
+    // configured capture limit has been reached.
+    std::uint64_t stdout_total_bytes = 0;
+    std::uint64_t stderr_total_bytes = 0;
+    bool stdout_truncated = false;
+    bool stderr_truncated = false;
     ProcessOutcome outcome;
     std::optional<int> exit_code;
     std::optional<int> terminating_signal;
@@ -112,6 +123,9 @@ struct ProcessExecutionOptions {
     std::stop_token stop_token;
     std::chrono::milliseconds termination_grace{100};
     std::optional<CgroupV2Options> cgroup;
+    // nullopt preserves legacy unlimited in-memory capture. A zero limit
+    // retains no payload for that stream but still fully drains it.
+    std::optional<OutputCaptureLimits> output_capture_limits;
 };
 
 [[nodiscard]] ProcessResult run_process(const ProcessSpec& spec,

@@ -10,6 +10,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <fcntl.h>
+#include <limits>
 #include <poll.h>
 #include <string_view>
 #include <sys/types.h>
@@ -174,12 +175,44 @@ void wait_for_launch_gate(int launch_read_fd, int startup_write_fd) {
     }
 }
 
-[[nodiscard]] bool drain_fd(UniqueFd& fd, std::string& output, ProcessErrorStage stage,
-                            ProcessResult& failure) {
+void append_captured_bytes(std::string& output, std::uint64_t& total_bytes, bool& truncated,
+                           std::optional<std::uint64_t> limit, const char* bytes,
+                           std::size_t count) {
+    const auto count_u64 = static_cast<std::uint64_t>(count);
+    if (std::numeric_limits<std::uint64_t>::max() - total_bytes < count_u64) {
+        total_bytes = std::numeric_limits<std::uint64_t>::max();
+    } else {
+        total_bytes += count_u64;
+    }
+
+    if (!limit.has_value()) {
+        output.append(bytes, count);
+        return;
+    }
+
+    const auto captured = static_cast<std::uint64_t>(output.size());
+    std::size_t append_count = 0;
+    if (captured < *limit) {
+        const auto remaining = *limit - captured;
+        append_count = static_cast<std::size_t>(std::min<std::uint64_t>(count_u64, remaining));
+        output.append(bytes, append_count);
+    }
+    if (append_count < count) {
+        truncated = true;
+    }
+}
+
+[[nodiscard]] bool drain_fd(UniqueFd& fd, std::string& output, std::uint64_t& total_bytes,
+                            bool& truncated, std::optional<std::uint64_t> capture_limit,
+                            ProcessErrorStage stage, ProcessResult& failure) {
     std::array<char, 8192> buffer{};
     while (true) {
         const ssize_t count = ::read(fd.get(), buffer.data(), buffer.size());
-        if (count > 0) { output.append(buffer.data(), static_cast<std::size_t>(count)); continue; }
+        if (count > 0) {
+            append_captured_bytes(output, total_bytes, truncated, capture_limit, buffer.data(),
+                                  static_cast<std::size_t>(count));
+            continue;
+        }
         if (count == 0) { fd.reset(); return true; }
         if (errno == EINTR) { continue; }
         if (errno == EAGAIN || errno == EWOULDBLOCK) { return true; }
@@ -232,11 +265,23 @@ void wait_for_launch_gate(int launch_read_fd, int startup_write_fd) {
 }
 
 void drain_available(UniqueFd& stdout_fd, UniqueFd& stderr_fd, UniqueFd& startup_fd,
-                     ProcessResult& result, std::string& startup_bytes) {
+                     ProcessResult& result, std::string& startup_bytes,
+                     const ProcessExecutionOptions& options) {
     ProcessResult ignored{};
-    (void)drain_fd(stdout_fd, result.stdout_data, ProcessErrorStage::parent_read_stdout, ignored);
-    (void)drain_fd(stderr_fd, result.stderr_data, ProcessErrorStage::parent_read_stderr, ignored);
-    (void)drain_fd(startup_fd, startup_bytes, ProcessErrorStage::parent_read_startup, ignored);
+    const auto stdout_limit = options.output_capture_limits
+                                  ? std::optional(options.output_capture_limits->stdout_bytes)
+                                  : std::nullopt;
+    const auto stderr_limit = options.output_capture_limits
+                                  ? std::optional(options.output_capture_limits->stderr_bytes)
+                                  : std::nullopt;
+    std::uint64_t ignored_total = 0;
+    bool ignored_truncated = false;
+    (void)drain_fd(stdout_fd, result.stdout_data, result.stdout_total_bytes, result.stdout_truncated,
+                   stdout_limit, ProcessErrorStage::parent_read_stdout, ignored);
+    (void)drain_fd(stderr_fd, result.stderr_data, result.stderr_total_bytes, result.stderr_truncated,
+                   stderr_limit, ProcessErrorStage::parent_read_stderr, ignored);
+    (void)drain_fd(startup_fd, startup_bytes, ignored_total, ignored_truncated, std::nullopt,
+                   ProcessErrorStage::parent_read_startup, ignored);
 }
 
 }  // namespace
@@ -349,6 +394,14 @@ ProcessResult run_process(const ProcessSpec& spec, const ProcessExecutionOptions
     stdout_pipe.write_end.reset(); stderr_pipe.write_end.reset(); startup_pipe.write_end.reset();
 
     std::string startup_bytes;
+    const auto stdout_limit = options.output_capture_limits
+                                  ? std::optional(options.output_capture_limits->stdout_bytes)
+                                  : std::nullopt;
+    const auto stderr_limit = options.output_capture_limits
+                                  ? std::optional(options.output_capture_limits->stderr_bytes)
+                                  : std::nullopt;
+    std::uint64_t startup_total_bytes = 0;
+    bool startup_truncated = false;
     bool reaped = false, io_ok = true;
     int wait_status = 0;
     ControlDecision control = ControlDecision::none;
@@ -406,13 +459,23 @@ ProcessResult run_process(const ProcessSpec& spec, const ProcessExecutionOptions
         if (poll_result < 0) { result = parent_failure(ProcessErrorStage::parent_poll, errno); io_ok = false; break; }
         for (nfds_t index = 0; index < count; ++index) {
             if (fds[index].revents == 0) continue;
-            bool drained = kinds[index] == 0 ? drain_fd(stdout_pipe.read_end, result.stdout_data, ProcessErrorStage::parent_read_stdout, result)
-                         : kinds[index] == 1 ? drain_fd(stderr_pipe.read_end, result.stderr_data, ProcessErrorStage::parent_read_stderr, result)
-                                           : drain_fd(startup_pipe.read_end, startup_bytes, ProcessErrorStage::parent_read_startup, result);
+            bool drained = kinds[index] == 0 ? drain_fd(stdout_pipe.read_end, result.stdout_data,
+                                                         result.stdout_total_bytes, result.stdout_truncated,
+                                                         stdout_limit, ProcessErrorStage::parent_read_stdout, result)
+                         : kinds[index] == 1 ? drain_fd(stderr_pipe.read_end, result.stderr_data,
+                                                         result.stderr_total_bytes, result.stderr_truncated,
+                                                         stderr_limit, ProcessErrorStage::parent_read_stderr, result)
+                                           : drain_fd(startup_pipe.read_end, startup_bytes, startup_total_bytes,
+                                                      startup_truncated, std::nullopt,
+                                                      ProcessErrorStage::parent_read_startup, result);
             if (!drained) { io_ok = false; break; }
         }
         if (!io_ok) break;
-        if (close_after_drain && reaped) { drain_available(stdout_pipe.read_end, stderr_pipe.read_end, startup_pipe.read_end, result, startup_bytes); stdout_pipe.read_end.reset(); stderr_pipe.read_end.reset(); startup_pipe.read_end.reset(); }
+        if (close_after_drain && reaped) {
+            drain_available(stdout_pipe.read_end, stderr_pipe.read_end, startup_pipe.read_end, result,
+                            startup_bytes, options);
+            stdout_pipe.read_end.reset(); stderr_pipe.read_end.reset(); startup_pipe.read_end.reset();
+        }
     }
 
     if (!reaped) {
