@@ -225,7 +225,11 @@ void CgroupV2Task::collect_events(ProcessResult& result) const {
         return target.has_value();
     };
     if (limits_.cpu) { any = true; if (!read_counter("cpu.stat", "nr_throttled", events.cpu_nr_throttled)) goto diagnostic_failure; }
-    if (limits_.memory_max_bytes) { any = true; if (!read_counter("memory.events", "oom_kill", events.memory_oom_kill)) goto diagnostic_failure; }
+    if (limits_.memory_max_bytes) {
+        any = true;
+        if (!read_counter("memory.events", "oom_kill", events.memory_oom_kill) ||
+            !read_counter("memory.events", "max", events.memory_max)) goto diagnostic_failure;
+    }
     if (limits_.pids_max) { any = true; if (!read_counter("pids.events", "max", events.pids_max)) goto diagnostic_failure; }
     if (any) result.cgroup_events = events;
     return;
