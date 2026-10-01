@@ -11,7 +11,39 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Configure
-        run: cmake -S . -B build
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DTASKFORGE_WARNINGS_AS_ERRORS=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+      - name: Verify production warning-as-error scope
+        env:
+          AUDIT_LABEL: GCC_CI
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          label = os.environ["AUDIT_LABEL"]
+          root = Path.cwd().resolve()
+          commands = json.loads((root / "build" / "compile_commands.json").read_text())
+          groups = {"production": [], "tests": [], "bench": []}
+          for entry in commands:
+              relative = Path(entry["file"]).resolve().relative_to(root)
+              command = entry["command"]
+              if relative.parts[0] == "src":
+                  groups["production"].append(command)
+              elif relative.parts[0] == "tests":
+                  groups["tests"].append(command)
+              elif relative.parts[0] == "bench":
+                  groups["bench"].append(command)
+
+          assert groups["production"], "no production compile commands found"
+          assert groups["tests"], "no test/helper compile commands found"
+          assert groups["bench"], "no benchmark compile commands found"
+          assert all("-Werror" in command.split() for command in groups["production"])
+          assert not any("-Werror" in command.split() for command in groups["tests"])
+          assert not any("-Werror" in command.split() for command in groups["bench"])
+          print(f"{label}_WERROR_VERIFIED=YES")
+          print(f"{label}_WERROR_SCOPE=PRODUCTION_ONLY")
+          PY
       - name: Build
         run: cmake --build build --parallel
       - name: Test
@@ -36,6 +68,56 @@ jobs:
           sudo sh -c "printf '%s' '+cpu +memory +pids' > '$root/cgroup.subtree_control'"
           sudo env TASKFORGE_CGROUP_TEST_ROOT="$root" \
             ctest --test-dir build --output-on-failure -R '^taskforge.cgroup_v2_integration$'
+
+  clang-build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        env:
+          CC: clang
+          CXX: clang++
+        run: cmake -S . -B build-clang -DCMAKE_BUILD_TYPE=Debug -DTASKFORGE_WARNINGS_AS_ERRORS=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+      - name: Verify Clang compiler
+        run: |
+          grep -Eq 'set\(CMAKE_CXX_COMPILER_ID "Clang"\)' build-clang/CMakeFiles/*/CMakeCXXCompiler.cmake
+          echo 'CLANG_CI_COMPILER_VERIFIED=YES'
+      - name: Verify production warning-as-error scope
+        env:
+          AUDIT_LABEL: CLANG_CI
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          label = os.environ["AUDIT_LABEL"]
+          root = Path.cwd().resolve()
+          commands = json.loads((root / "build-clang" / "compile_commands.json").read_text())
+          groups = {"production": [], "tests": [], "bench": []}
+          for entry in commands:
+              relative = Path(entry["file"]).resolve().relative_to(root)
+              command = entry["command"]
+              if relative.parts[0] == "src":
+                  groups["production"].append(command)
+              elif relative.parts[0] == "tests":
+                  groups["tests"].append(command)
+              elif relative.parts[0] == "bench":
+                  groups["bench"].append(command)
+
+          assert groups["production"], "no production compile commands found"
+          assert groups["tests"], "no test/helper compile commands found"
+          assert groups["bench"], "no benchmark compile commands found"
+          assert all("-Werror" in command.split() for command in groups["production"])
+          assert not any("-Werror" in command.split() for command in groups["tests"])
+          assert not any("-Werror" in command.split() for command in groups["bench"])
+          print(f"{label}_WERROR_VERIFIED=YES")
+          print(f"{label}_WERROR_SCOPE=PRODUCTION_ONLY")
+          PY
+      - name: Build
+        run: cmake --build build-clang --parallel
+      - name: Test non-privileged registry
+        run: ctest --test-dir build-clang --output-on-failure -E '^taskforge.cgroup_v2_integration$'
 
   asan-ubsan:
     runs-on: ubuntu-latest
