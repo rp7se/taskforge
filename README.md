@@ -24,3 +24,25 @@ cmake --build build
 ./build/taskforge
 ctest --test-dir build --output-on-failure
 ```
+
+## Benchmark
+
+Phase 9 adds a reproducible Release-only evaluation harness for launch latency,
+worker scaling, logical resource admission, bounded-queue backpressure, bounded
+output retention, and deterministic mixed-workload completion accounting. It
+uses fixed workloads and correctness invariants; CI runs only short structural
+smoke scenarios and has no timing threshold.
+
+Latest local Release results (WSL2, Ryzen 9 8945HX, 32 logical CPUs) measured
+launch p50/p95 of 21,314/21,604 us and 1/2/4/8-worker throughput of
+21.48/42.90/85.62/163.93 tasks/s for the fixed 25 ms workload. Resource
+admission limited the 2000m/1000m workload to two concurrent tasks; a 300-task
+mixed stress run completed every accepted task with unique IDs.
+
+```sh
+cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release
+cmake --build build-release --parallel
+./bench/run_benchmarks.sh build-release docs/benchmark-results.md
+```
+
+See [the full benchmark environment, results, methodology, and limitations](docs/benchmark-results.md).
