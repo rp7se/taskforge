@@ -9,6 +9,8 @@ Taskforge is a C++20 project built with CMake.
 - Phase 3: timeout and C++20 stop-token cancellation for direct child processes
 - Phase 4: process-group cleanup with SIGTERM grace and SIGKILL escalation
 - Phase 5: Concurrent Executor and Backpressure
+- Phase 6: cgroup v2 Resource Control (explicit delegated roots, per-task CPU,
+  memory, and PID limits)
 
 ## Build and test
 

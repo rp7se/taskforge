@@ -2,11 +2,14 @@
 #include <chrono>
 #include <cerrno>
 #include <csignal>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
 #include <string_view>
 #include <thread>
+#include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -79,6 +82,90 @@ int main(int argc, char* argv[]) {
     }
     if (mode == "sleep" && argc == 3) {
         std::this_thread::sleep_for(std::chrono::milliseconds(std::atoi(argv[2])));
+        return 0;
+    }
+    if (mode == "cgroup-membership") {
+        std::FILE* membership = std::fopen("/proc/self/cgroup", "r");
+        if (membership == nullptr) {
+            return 6;
+        }
+        char buffer[512]{};
+        while (std::fgets(buffer, sizeof(buffer), membership) != nullptr) {
+            write_all(STDOUT_FILENO, buffer, std::char_traits<char>::length(buffer));
+        }
+        std::fclose(membership);
+        return 0;
+    }
+    if (mode == "cpu-burn" && argc == 3) {
+        const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(std::atoi(argv[2]));
+        volatile std::uint64_t accumulator = 1;
+        while (std::chrono::steady_clock::now() < until) {
+            accumulator = accumulator * 1664525U + 1013904223U;
+        }
+        return accumulator == 0 ? 7 : 0;
+    }
+    if (mode == "allocate-touch" && argc == 3) {
+        const std::size_t bytes = static_cast<std::size_t>(std::strtoull(argv[2], nullptr, 10));
+        std::cout << "MEMORY_HELPER_STARTED\n" << std::flush;
+        const rlimit unlimited_memlock{RLIM_INFINITY, RLIM_INFINITY};
+        if (::setrlimit(RLIMIT_MEMLOCK, &unlimited_memlock) != 0) {
+            std::perror("MEMORY_HELPER_SETMEMLOCK");
+            return 8;
+        }
+        void* mapping = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE,
+                               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (mapping == MAP_FAILED) {
+            return 8;
+        }
+        auto* allocation = static_cast<volatile unsigned char*>(mapping);
+        constexpr std::size_t page = 4096;
+        constexpr std::size_t lock_chunk = 1024 * 1024;
+        for (std::size_t chunk_offset = 0; chunk_offset < bytes; chunk_offset += lock_chunk) {
+            const std::size_t chunk_size = bytes - chunk_offset < lock_chunk ? bytes - chunk_offset : lock_chunk;
+            for (std::size_t offset = chunk_offset; offset < chunk_offset + chunk_size; offset += page) {
+                // A non-zero value forces a private physical page rather than
+                // retaining the anonymous shared zero page.
+                allocation[offset] = static_cast<unsigned char>((offset / page) % 251 + 1);
+            }
+            // Keep already-grown pages resident.  Otherwise a swap-enabled
+            // runner can reclaim them and avoid the memcg OOM path entirely.
+            if (::mlock(const_cast<unsigned char*>(allocation) + chunk_offset, chunk_size) != 0) {
+                std::perror("MEMORY_HELPER_MLOCK");
+                (void)::munmap(const_cast<unsigned char*>(allocation), bytes);
+                return 9;
+            }
+        }
+        if (bytes != 0) allocation[bytes - 1] = 1;
+        char line[64]{};
+        const int length = std::snprintf(line, sizeof(line), "TOUCHED=%zu\n", bytes);
+        write_all(STDOUT_FILENO, line, static_cast<std::size_t>(length));
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        (void)::munmap(const_cast<unsigned char*>(allocation), bytes);
+        return 0;
+    }
+    if (mode == "fork-hold" && argc == 4) {
+        const int requested = std::atoi(argv[2]);
+        const int hold_ms = std::atoi(argv[3]);
+        std::array<pid_t, 64> children{};
+        int created = 0;
+        for (; created < requested && created < static_cast<int>(children.size()); ++created) {
+            const pid_t child = ::fork();
+            if (child == 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
+                _exit(0);
+            }
+            if (child < 0) {
+                break;
+            }
+            children[created] = child;
+        }
+        char line[64]{};
+        const int length = std::snprintf(line, sizeof(line), "CREATED=%d\n", created);
+        write_all(STDOUT_FILENO, line, static_cast<std::size_t>(length));
+        for (int index = 0; index < created; ++index) {
+            while (::waitpid(children[index], nullptr, 0) < 0 && errno == EINTR) {
+            }
+        }
         return 0;
     }
     if (mode == "exit-after" && argc == 4) {

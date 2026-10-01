@@ -12,6 +12,7 @@ find_package(Threads REQUIRED)
 add_library(taskforge_lib
     src/taskforge.cpp
     src/process_executor.cpp
+    src/cgroup_v2.cpp
     src/task_state.cpp
     src/concurrent_executor.cpp
 )
@@ -53,8 +54,21 @@ if(BUILD_TESTING)
         PRIVATE TASKFORGE_PROCESS_TEST_HELPER="$<TARGET_FILE:taskforge_process_test_helper>")
     target_compile_options(taskforge_concurrent_executor_test PRIVATE -Wall -Wextra -Wpedantic)
 
+    add_executable(taskforge_cgroup_v2_test tests/cgroup_v2_test.cpp)
+    target_link_libraries(taskforge_cgroup_v2_test PRIVATE taskforge_lib)
+    target_compile_options(taskforge_cgroup_v2_test PRIVATE -Wall -Wextra -Wpedantic)
+
+    add_executable(taskforge_cgroup_v2_integration_test tests/cgroup_v2_integration_test.cpp)
+    target_link_libraries(taskforge_cgroup_v2_integration_test PRIVATE taskforge_lib Threads::Threads)
+    target_compile_definitions(taskforge_cgroup_v2_integration_test
+        PRIVATE TASKFORGE_PROCESS_TEST_HELPER="$<TARGET_FILE:taskforge_process_test_helper>")
+    target_compile_options(taskforge_cgroup_v2_integration_test PRIVATE -Wall -Wextra -Wpedantic)
+
     add_test(NAME taskforge.smoke COMMAND taskforge_smoke_test)
     add_test(NAME taskforge.process_executor COMMAND taskforge_process_executor_test)
     add_test(NAME taskforge.task_state COMMAND taskforge_task_state_test)
     add_test(NAME taskforge.concurrent_executor COMMAND taskforge_concurrent_executor_test)
+    add_test(NAME taskforge.cgroup_v2 COMMAND taskforge_cgroup_v2_test)
+    add_test(NAME taskforge.cgroup_v2_integration COMMAND taskforge_cgroup_v2_integration_test)
+    set_tests_properties(taskforge.cgroup_v2_integration PROPERTIES SKIP_RETURN_CODE 77)
 endif()
